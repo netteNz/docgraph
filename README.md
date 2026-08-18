@@ -34,7 +34,7 @@ index.py       SQLite + FTS5 (porter stemming), recursive H2→H4 chunking
      │         for long catalog docs, content-hash dedup, size-capped
      │         co-location edges between files in the same directory
      ▼
-docgraph.db
+db/docgraph.db
      │
      ▼
 context.py     task → AND-first/OR-fallback FTS query → co-location
@@ -53,16 +53,16 @@ pip install -e .
 
 ```bash
 # Build the index for a repo
-python -m docgraph.index /path/to/repo docgraph.db
+python -m docgraph.index /path/to/repo db/my-repo.db
 
 # Generate a context pack directly (useful for testing before wiring into an agent)
-python -m docgraph.context /path/to/repo docgraph.db "task description" --max-tokens 8000
+python -m docgraph.context /path/to/repo db/my-repo.db "task description" --max-tokens 8000
 
 # Run as an MCP server (stdio) — point your MCP client's config at this
-python -m docgraph.mcp_server /path/to/repo docgraph.db
+python -m docgraph.mcp_server /path/to/repo db/my-repo.db
 
 # Simple graph visualization (file-level nodes, co-location edges)
-python -m docgraph.visualize docgraph.db graph.html --title "my-repo"
+python -m docgraph.visualize db/my-repo.db graphs/my-repo_graph.html --title "my-repo"
 ```
 
 Task strings are used as keyword search, not semantic search — be specific,
@@ -73,7 +73,7 @@ that doesn't exist yet).
 
 ```bash
 claude mcp add my-repo-docs -s user -e PYTHONIOENCODING=utf-8 -- \
-  python -m docgraph.mcp_server /path/to/repo /full/path/to/docgraph.db
+  python -m docgraph.mcp_server /path/to/repo /full/path/to/db/my-repo.db
 ```
 
 One server instance = one repo + one index. For multiple repos, register

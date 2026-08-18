@@ -17,12 +17,13 @@ Modules (`src/docgraph/`):
 - `mcp_server.py` — MCP server wrapping `context.py`'s `build_pack()` as a tool (`docgraph_context`)
 - `visualize.py` — renders a self-contained D3 HTML graph (file nodes, co-location edges, colored by bucket, sized by token count)
 
-## Two live indexes in this directory
+## Live indexes in this directory
 
 | DB file | Source repo | Registered MCP server name |
 |---|---|---|
-| `docgraph-trading.db` | `D:\code\web-development\trading-dashboard` | `docgraph-trading-dashboard` |
-| `docgraph.db` | `D:\code\agentic-development\reinforcement-learning-stocks` | `docgraph-rl-stocks` |
+| `db/docgraph-trading.db` | `D:\code\web-development\trading-dashboard` | `docgraph-trading-dashboard` |
+| `db/docgraph.db` | `D:\code\agentic-development\reinforcement-learning-stocks` | `docgraph-rl-stocks` |
+| `db/coinbase_rl_bot.db` | `D:\code\agentic-development\coinbase-rl-bot` | not registered |
 
 Both registered via `claude mcp add ... -s user -e PYTHONIOENCODING=utf-8 -- python -m docgraph.mcp_server <repo_root> <db_path>`. Check with `claude mcp list`.
 
@@ -34,15 +35,15 @@ cwd silently creates/opens a second, empty db file instead of erroring.
 
 ```bash
 cd /d/code/docgraph
-python -m docgraph.index /d/code/web-development/trading-dashboard docgraph-trading.db
-python -m docgraph.index /d/code/agentic-development/reinforcement-learning-stocks docgraph.db
+python -m docgraph.index /d/code/web-development/trading-dashboard db/docgraph-trading.db
+python -m docgraph.index /d/code/agentic-development/reinforcement-learning-stocks db/docgraph.db
 ```
 
 ## Querying context directly (outside the MCP tool)
 
 ```bash
 cd /d/code/docgraph
-PYTHONIOENCODING=utf-8 python -m docgraph.context /d/code/web-development/trading-dashboard docgraph-trading.db "<task description>" --max-tokens 8000
+PYTHONIOENCODING=utf-8 python -m docgraph.context /d/code/web-development/trading-dashboard db/docgraph-trading.db "<task description>" --max-tokens 8000
 ```
 
 `PYTHONIOENCODING=utf-8` is required on this Windows/PowerShell console —
@@ -53,8 +54,8 @@ with `UnicodeEncodeError` on the default cp1252 codepage.
 
 ```bash
 cd /d/code/docgraph
-python -m docgraph.visualize docgraph-trading.db trading_graph.html --title "trading-dashboard"
-python -m docgraph.visualize docgraph.db rl_stocks_graph.html --title "reinforcement-learning-stocks"
+python -m docgraph.visualize db/docgraph-trading.db graphs/trading_graph.html --title "trading-dashboard"
+python -m docgraph.visualize db/docgraph.db graphs/rl_stocks_graph.html --title "reinforcement-learning-stocks"
 ```
 
 Open the `.html` output directly in a browser — no server needed. Nodes =
@@ -62,8 +63,8 @@ files (not chunks), colored by discovery bucket (gray=root, blue=docs,
 purple=skills, green=subdir-allcaps), sized by token count, edges =
 co-location relationships. Deliberately a structural/corpus-shape view, not a
 retrieval view — doesn't show chunk-level (H2/H3) structure or FTS relevance.
-Both `trading_graph.html` and `rl_stocks_graph.html` already exist in this
-directory from the last run.
+Both `graphs/trading_graph.html` and `graphs/rl_stocks_graph.html` already
+exist in this directory from the last run.
 
 ## Known gotchas (hit these already, don't re-debug them)
 

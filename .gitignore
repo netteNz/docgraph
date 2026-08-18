@@ -7,7 +7,7 @@ venv/
 build/
 dist/
 
-# Generated indexes / output (per-repo, rebuildable via HANDOFF.md instructions)
+# Generated indexes / output (per-repo, rebuildable via docs/HANDOFF.md instructions)
 *.db
 *.db-journal
 docgraph_out.txt

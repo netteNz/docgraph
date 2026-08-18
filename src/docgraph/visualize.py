@@ -9,8 +9,11 @@ This is a POC, not the deferred "V1 web graph" — no search, no context-pack
 panel, no click-to-inspect beyond a basic tooltip. Just: does the shape of
 the corpus look right when you can see it.
 """
+from __future__ import annotations
+
 import json
 import sqlite3
+from collections import Counter, defaultdict
 from pathlib import Path
 
 BUCKET_COLORS = {
@@ -19,6 +22,135 @@ BUCKET_COLORS = {
     "skills": "#bc8cff",
     "subdir-allcaps": "#3fb950",
 }
+
+# Filename stems (no extension) that make a good "hub" for a directory of
+# otherwise-unlinked docs, in priority order.
+HUB_STEM_PRIORITY = ["readme", "index", "skill", "claude", "architecture"]
+
+
+def _parent_dir(path: str) -> str:
+    """Directory portion of a doc path, tolerant of '/' or '\\' separators."""
+    sep = "\\" if "\\" in path else "/"
+    parts = path.split(sep)
+    return sep.join(parts[:-1])
+
+
+def _dir_sep(path: str) -> str:
+    return "\\" if "\\" in path else "/"
+
+
+def _pick_hub(paths: list[str]) -> str:
+    """Pick the most index-like file in a directory to act as the hub node.
+
+    Tiers: exact filename stem match > stem starts with a priority word >
+    stem contains a priority word > alphabetically first (deterministic
+    fallback when nothing looks index-like).
+    """
+    def stem(p: str) -> str:
+        base = p.rsplit(_dir_sep(p), 1)[-1]
+        return base.lower().rsplit(".", 1)[0]
+
+    stems = {p: stem(p) for p in paths}
+    for name in HUB_STEM_PRIORITY:
+        for p in sorted(stems):
+            if stems[p] == name:
+                return p
+    for name in HUB_STEM_PRIORITY:
+        for p in sorted(stems):
+            if stems[p].startswith(name):
+                return p
+    for name in HUB_STEM_PRIORITY:
+        for p in sorted(stems):
+            if name in stems[p]:
+                return p
+    return sorted(paths)[0]
+
+
+def add_structural_ties(nodes: list[dict], links: list[dict]) -> list[dict]:
+    """Ensure every node has at least one edge.
+
+    Co-location edges only get generated within directories small enough to
+    pairwise-link without exploding into a hairball, so any directory above
+    that size — or any file sitting alone in its own directory — ends up
+    with zero edges even though it clearly belongs to the corpus. This adds
+    two kinds of edges to close that gap, tagged kind="structural" so the
+    renderer can style them apart from real co-location edges:
+
+    1. Hub-and-spoke within a directory of otherwise-unlinked files, using
+       the most index-like filename (README/INDEX/SKILL/etc.) as the hub.
+    2. For files that are the *only* doc in their directory (so there's no
+       one to spoke to), one bridging edge to the nearest already-connected
+       node one level down (a subdirectory) or one level up (the parent),
+       preferring down since an index-style file's natural children usually
+       matter more than its parent.
+    """
+    ids = [n["id"] for n in nodes]
+    connected = set()
+    for l in links:
+        connected.add(l["source"])
+        connected.add(l["target"])
+    orphans = [i for i in ids if i not in connected]
+    if not orphans:
+        return links
+
+    by_dir_all = defaultdict(list)
+    for n in nodes:
+        by_dir_all[_parent_dir(n["id"])].append(n["id"])
+
+    by_dir_orphans = defaultdict(list)
+    for oid in orphans:
+        by_dir_orphans[_parent_dir(oid)].append(oid)
+
+    new_edges = []
+    for group in by_dir_orphans.values():
+        hub = _pick_hub(group)
+        for oid in group:
+            if oid != hub:
+                new_edges.append((hub, oid))
+
+    degree = Counter()
+    for l in links:
+        degree[l["source"]] += 1
+        degree[l["target"]] += 1
+    for a, b in new_edges:
+        degree[a] += 1
+        degree[b] += 1
+
+    zero_degree = sorted(i for i in ids if degree[i] == 0)
+    for h in zero_degree:
+        d = _parent_dir(h)
+        sep = _dir_sep(h) if h else "/"
+        anchor = None
+
+        child_dirs = sorted(
+            k for k in by_dir_all
+            if k.startswith(d + sep) and k.count(sep) == d.count(sep) + 1
+        )
+        for cd in child_dirs:
+            for c in sorted(by_dir_all[cd]):
+                if degree[c] > 0:
+                    anchor = c
+                    break
+            if anchor:
+                break
+
+        if not anchor and d:
+            parent = sep.join(d.split(sep)[:-1])
+            for c in sorted(by_dir_all.get(parent, [])):
+                if degree[c] > 0:
+                    anchor = c
+                    break
+
+        if anchor:
+            new_edges.append((anchor, h))
+            degree[anchor] += 1
+            degree[h] += 1
+        # else: no directory relationship to tie to at all (shouldn't occur
+        # in practice); leave it, rather than inventing an unrelated link.
+
+    augmented = list(links)
+    augmented += [{"source": a, "target": b, "kind": "structural"} for a, b in new_edges]
+    return augmented
 
 TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -61,7 +193,7 @@ TEMPLATE = """<!DOCTYPE html>
 <body>
 <div id="legend"></div>
 <div id="tooltip"></div>
-<div id="stats">{node_count} files, {edge_count} co-location edges — drag nodes, scroll to zoom</div>
+<div id="stats">{node_count} files, {stats_label} — drag nodes, scroll to zoom</div>
 <svg id="graph" width="100%" height="100vh"></svg>
 <script>
 const data = {data_json};
@@ -106,7 +238,8 @@ const linkG = g.append("g").attr("class", "links");
 const link = linkG.selectAll("line").data(data.links).join("line")
   .attr("stroke", "#21262d")
   .attr("stroke-width", 1)
-  .attr("stroke-opacity", 0.7);
+  .attr("stroke-opacity", 0.7)
+  .attr("stroke-dasharray", d => d.kind === "structural" ? "3,3" : null);
 
 // ── Nodes ────────────────────────────────────────────────────────────────────
 const nodeG = g.append("g").attr("class", "nodes");
@@ -210,19 +343,6 @@ sim.on("tick.spawn", () => {{
       .attr("r", r).attr("fill-opacity", 1);
   }});
 
-  // Expanding pulse ring per node
-  nodeG.selectAll(".pulse-ring")
-    .data(data.nodes).join("circle")
-    .attr("class", "pulse-ring")
-    .attr("cx", d => d.x).attr("cy", d => d.y)
-    .attr("r", d => sizeScale(d.tokens || 1))
-    .attr("stroke", d => bucketColors[d.bucket] || "#8b949e")
-    .attr("fill", "none").attr("stroke-opacity", 0.6)
-    .each(function(d, i) {{
-      d3.select(this).transition().delay(i * 6).duration(800).ease(d3.easeExpOut)
-        .attr("r", d => sizeScale(d.tokens || 1) + 22)
-        .attr("stroke-opacity", 0).remove();
-    }});
 }});
 
 // ── Legend ────────────────────────────────────────────────────────────────────
@@ -232,6 +352,15 @@ Object.entries(bucketColors).forEach(([bucket, color]) => {{
   row.append("span").attr("class", "dot").style("background", color).style("box-shadow", `0 0 6px ${{color}}55`);
   row.append("span").text(bucket).style("color", "#8b949e");
 }});
+
+if (data.links.some(l => l.kind === "structural")) {{
+  const row = legend.append("div");
+  row.append("span")
+    .style("width", "14px").style("height", "0")
+    .style("border-top", "1.5px dashed #6e7681")
+    .style("display", "inline-block");
+  row.append("span").text("structural tie (no direct co-location)").style("color", "#8b949e");
+}}
 </script>
 </body>
 </html>
@@ -253,12 +382,18 @@ def build_html(db_path: Path, title: str = "") -> str:
          "bucket": d["bucket"], "tokens": d["token_est"]}
         for d in docs
     ]
-    links = [{"source": e["source"], "target": e["target"]} for e in edges]
+    links = [{"source": e["source"], "target": e["target"], "kind": "colocation"} for e in edges]
+    links = add_structural_ties(nodes, links)
+    structural_count = sum(1 for l in links if l.get("kind") == "structural")
+
+    stats_label = f"{len(links)} edges"
+    if structural_count:
+        stats_label += f" ({structural_count} structural)"
 
     return TEMPLATE.format(
         title=title or db_path.stem,
         node_count=len(nodes),
-        edge_count=len(links),
+        stats_label=stats_label,
         data_json=json.dumps({"nodes": nodes, "links": links}),
         colors_json=json.dumps(BUCKET_COLORS),
     )
