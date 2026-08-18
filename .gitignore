@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Generated indexes / output (per-repo, rebuildable via HANDOFF.md instructions)
+*.db
+*.db-journal
+docgraph_out.txt
+
+# Generated graph visualizations
+*_graph.html
+
+# Crash dumps
+*.stackdump
+
+# Editor / OS
+.vscode/
+.DS_Store
