@@ -39,8 +39,12 @@ db/docgraph.db
      ▼
 context.py     task → AND-first/OR-fallback FTS query → co-location
      │         neighbor expansion (score-floored) → token-budget trim
-     ▼
-mcp_server.py  wraps it as one MCP tool, stdio transport
+     ├─────────────────────────────┐
+     ▼                             ▼
+mcp_server.py                  serve.py       live web graph: task box ->
+wraps it as one                real retrieval -> highlighted nodes +
+MCP tool, stdio                rendered markdown pack panel
+transport
 ```
 
 ## Install
@@ -61,8 +65,13 @@ python -m docgraph.context /path/to/repo db/my-repo.db "task description" --max-
 # Run as an MCP server (stdio) — point your MCP client's config at this
 python -m docgraph.mcp_server /path/to/repo db/my-repo.db
 
-# Simple graph visualization (file-level nodes, co-location edges)
+# Simple graph visualization (file-level nodes, co-location edges) — static, no server
 python -m docgraph.visualize db/my-repo.db graphs/my-repo_graph.html --title "my-repo"
+
+# Live web graph: same corpus graph, plus a task box that runs real retrieval
+# and highlights exactly which files were selected, with the rendered pack
+# in a resizable side panel
+python -m docgraph.serve /path/to/repo db/my-repo.db --port 8765
 ```
 
 Task strings are used as keyword search, not semantic search — be specific,
@@ -78,6 +87,29 @@ claude mcp add my-repo-docs -s user -e PYTHONIOENCODING=utf-8 -- \
 
 One server instance = one repo + one index. For multiple repos, register
 multiple servers with distinct names and separate `.db` files.
+
+## Live web graph (`serve.py`)
+
+```bash
+python -m docgraph.serve /path/to/repo db/my-repo.db --port 8765 [--host 127.0.0.1]
+```
+
+The same force-directed corpus graph as `visualize.py`, served locally
+(stdlib `http.server`, no new dependency) with:
+
+- A task box that calls real retrieval (`context.retrieve`) and highlights
+  which file nodes were actually selected into the pack — solid glow for
+  seed matches, dashed for co-location neighbors pulled in via expansion —
+  dimming everything else.
+- A resizable side panel rendering the selected pack as formatted markdown
+  (headings, code blocks, tables — via `marked`, CDN-loaded like D3). Drag
+  its left edge or click the `⤢` button to expand it.
+- A status line under the box showing chunk count, and graceful empty-state
+  when a task matches nothing.
+
+`GET /context?task=...&max_tokens=...` is the underlying JSON endpoint if you
+want to hit it directly. Local dev tool only — no auth, binds `127.0.0.1` by
+default.
 
 ## Discovery rule
 
@@ -114,8 +146,10 @@ Any bucket can be excluded per-run with `--exclude-bucket`.
 ## Status
 
 MVP, validated against three real repos of different shapes (10, 8, and
-72-file corpora) and in live use via Claude Code. Not built: embeddings,
-watch mode, a real graph UI beyond the visualization POC, cross-repo search.
+72-file corpora) and in live use via Claude Code. The live web graph
+(`serve.py`) closes the "real graph UI" gap — file-level highlighting only
+for now, chunk/heading-level nodes deferred. Not built: embeddings, watch
+mode, cross-repo search.
 
 ## License
 

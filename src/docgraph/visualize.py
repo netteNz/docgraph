@@ -5,9 +5,10 @@ Nodes = files (docs table) — not chunks, that'd be too many nodes for a POC.
 Edges = co-location relationships (edges table, kind='colocation').
 Output = one self-contained HTML file (D3 via CDN, no build step, no server).
 
-This is a POC, not the deferred "V1 web graph" — no search, no context-pack
+This is a POC, not the live "V1 web graph" — no search, no context-pack
 panel, no click-to-inspect beyond a basic tooltip. Just: does the shape of
-the corpus look right when you can see it.
+the corpus look right when you can see it. See serve.py for the live,
+retrieval-driven version.
 """
 from __future__ import annotations
 
@@ -367,7 +368,10 @@ if (data.links.some(l => l.kind === "structural")) {{
 """
 
 
-def build_html(db_path: Path, title: str = "") -> str:
+def graph_data(db_path: Path) -> dict:
+    """File-level nodes (docs) + co-location edges, augmented with structural
+    ties so every node has at least one edge. Shared by build_html and serve.py
+    so both rendering paths stay on the same corpus-shape logic."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
@@ -384,6 +388,12 @@ def build_html(db_path: Path, title: str = "") -> str:
     ]
     links = [{"source": e["source"], "target": e["target"], "kind": "colocation"} for e in edges]
     links = add_structural_ties(nodes, links)
+    return {"nodes": nodes, "links": links}
+
+
+def build_html(db_path: Path, title: str = "") -> str:
+    data = graph_data(db_path)
+    nodes, links = data["nodes"], data["links"]
     structural_count = sum(1 for l in links if l.get("kind") == "structural")
 
     stats_label = f"{len(links)} edges"
@@ -394,7 +404,7 @@ def build_html(db_path: Path, title: str = "") -> str:
         title=title or db_path.stem,
         node_count=len(nodes),
         stats_label=stats_label,
-        data_json=json.dumps({"nodes": nodes, "links": links}),
+        data_json=json.dumps(data),
         colors_json=json.dumps(BUCKET_COLORS),
     )
 

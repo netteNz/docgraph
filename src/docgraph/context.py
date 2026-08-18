@@ -65,13 +65,21 @@ _NEIGHBOR_SQL = (
 )
 
 
-def build_pack(
+def retrieve(
     repo_root: Path,
     db_path: Path,
     task: str,
     max_tokens: int = 8000,
     seed_limit: int = 10,
-) -> str:
+) -> dict:
+    """Run retrieval and return structured data (no rendering).
+
+    {
+      "task": str, "query_used": "AND"|"OR", "budget": int, "total_tokens": int,
+      "chunks": [{"id", "path", "indexed_title", "heading", "token_est",
+                  "score", "rank", "provenance": "seed"|"neighbor", "body"}, ...]
+    }
+    """
     repo_root = repo_root.resolve()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -90,9 +98,11 @@ def build_pack(
 
     ranked: dict[int, float] = {}
     meta: dict[int, sqlite3.Row] = {}
+    provenance: dict[int, str] = {}
     for i, row in enumerate(seeds):
         ranked[row["id"]] = float(i)
         meta[row["id"]] = row
+        provenance[row["id"]] = "seed"
 
     seed_paths = {row["path"] for row in seeds}
     # Neighbor expansion is score-floored: a co-located file only enters the
@@ -112,6 +122,7 @@ def build_pack(
                 if nc["id"] not in ranked:
                     ranked[nc["id"]] = i + 0.5
                     meta[nc["id"]] = nc
+                    provenance[nc["id"]] = "neighbor"
 
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
     selected, running = [], 0
@@ -122,25 +133,57 @@ def build_pack(
         selected.append(m)
         running += m["token_est"]
 
-    conn.close()
-    return _render(repo_root, task, selected, running, max_tokens, query_used)
-
-
-def _render(repo_root: Path, task: str, selected, running: int, budget: int, query_used: str) -> str:
-    out = ["# DocGraph context pack", "", f"Task: {task}", "",
-           f"{len(selected)} chunks, ~{running} tokens (budget {budget}, "
-           f"{query_used}-matched seeds)", ""]
+    chunks = []
     for m in selected:
-        out.append(f"## {m['indexed_title']}")
-        loc = m["path"] + (f" \u00a7 {m['heading']}" if m["heading"] else "")
-        out.append(f"Source: {loc}")
-        out.append("")
+        chunk_id = m["id"]
         try:
             raw = (repo_root / m["path"]).read_text(encoding="utf-8", errors="replace")
             full_body = frontmatter.loads(raw).content
-            out.append(extract_section(full_body, m["heading"]).strip())
+            body = extract_section(full_body, m["heading"]).strip()
         except OSError as e:
-            out.append(f"[could not read source: {e}]")
+            body = f"[could not read source: {e}]"
+        chunks.append({
+            "id": chunk_id,
+            "path": m["path"],
+            "indexed_title": m["indexed_title"],
+            "heading": m["heading"],
+            "token_est": m["token_est"],
+            "score": m["score"],
+            "rank": ranked[chunk_id],
+            "provenance": provenance[chunk_id],
+            "body": body,
+        })
+
+    conn.close()
+    return {
+        "task": task,
+        "query_used": query_used,
+        "budget": max_tokens,
+        "total_tokens": running,
+        "chunks": chunks,
+    }
+
+
+def build_pack(
+    repo_root: Path,
+    db_path: Path,
+    task: str,
+    max_tokens: int = 8000,
+    seed_limit: int = 10,
+) -> str:
+    return _render(retrieve(repo_root, db_path, task, max_tokens, seed_limit))
+
+
+def _render(data: dict) -> str:
+    out = ["# DocGraph context pack", "", f"Task: {data['task']}", "",
+           f"{len(data['chunks'])} chunks, ~{data['total_tokens']} tokens "
+           f"(budget {data['budget']}, {data['query_used']}-matched seeds)", ""]
+    for c in data["chunks"]:
+        out.append(f"## {c['indexed_title']}")
+        loc = c["path"] + (f" § {c['heading']}" if c["heading"] else "")
+        out.append(f"Source: {loc}")
+        out.append("")
+        out.append(c["body"])
         out.append("")
     return "\n".join(out)
 
