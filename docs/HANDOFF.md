@@ -2,6 +2,41 @@
 
 **Last updated**: 2026-08-18
 
+## 2026-08-18 — V2 link edges: added, decision gate still open
+
+Added `kind='link'` edges (directional, doc-level, `MAX_LINK_FANOUT=10`
+skip-not-truncate on hub docs) and unconditional one-hop link-neighbor
+expansion in `retrieve()` (`MAX_LINK_NEIGHBORS_PER_SEED=5`, ranked below
+every seed/co-location neighbor, `provenance="link"` + `via` field). Full
+rationale in CLAUDE.md's "Link edges" section (local-only file, not in git
+— see `.gitignore`) and README's Design notes.
+
+**Phase 0 audit results** (`scripts/link_audit.py`, run against the three
+corpora indexed below):
+- trading-dashboard: 0 links in real docs (vendor dirs already excluded) —
+  no signal possible.
+- rl-stocks: 87 links found, 17 resolved (post-dedup), 13 disjoint — 12 of
+  those from a single `docs/INDEX.md` hub (now fully suppressed by the
+  fan-out cap), 1 organic.
+- coinbase-rl-bot: 6 links, 4 resolved, 2 organic disjoint pairs.
+
+**Status: implemented and fixture-tested, NOT yet validated in real use.**
+`tests/run_link_fixtures.py` passes (3/3 organic, 1/1 hub-suppression), but
+those fixtures were derived from the same audit that found the pairs — that
+confirms the code implements the rule correctly, not that the rule is
+useful independent of having been designed around these exact examples.
+Decision: don't graduate to weights/hop-2/visualizer, and don't audit more
+corpora yet either. Next step is to run this for real (a week of actual
+`docgraph_context` use on rl-stocks or coinbase-rl-bot with `provenance`
+visible) and watch for two things: does a link-recovered section ever
+change what the agent actually does, and does `via` ever surface something
+that should've been suppressed. If it's inert or noisy there, kill it
+before building the expensive parts.
+
+All three indexes below were already rebuilt this session (`docgraph.index`
+rerun after the `links.py` change), so their `edges` tables already have
+`kind='link'` rows — no reindex needed before picking this back up.
+
 ## What this repo is
 
 `docgraph` is a small local tool: it indexes a repo's markdown corpus into a
@@ -56,6 +91,7 @@ Then either `source .venv/bin/activate` first, or call `.venv/bin/python -m docg
 | `db/docgraph-trading.db` | `D:\code\web-development\trading-dashboard` | Windows | `docgraph-trading-dashboard` |
 | `db/docgraph.db` | `D:\code\agentic-development\reinforcement-learning-stocks` | Windows | `docgraph-rl-stocks` |
 | `db/coinbase_rl_bot.db` | `D:\code\agentic-development\coinbase-rl-bot` | Windows | not registered |
+| `db/document_parser.db` | `D:\code\microsoft\document_parser` | Windows | not registered |
 
 Windows entries registered via `claude mcp add ... -s user -e PYTHONIOENCODING=utf-8 -- python -m docgraph.mcp_server <repo_root> <db_path>`. Check with `claude mcp list`.
 

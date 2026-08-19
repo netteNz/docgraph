@@ -21,3 +21,6 @@ docgraph_out.txt
 # Editor / OS
 .vscode/
 .DS_Store
+
+# Local Claude Code project notes (not shared via git)
+CLAUDE.md

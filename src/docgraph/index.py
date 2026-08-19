@@ -27,6 +27,7 @@ from pathlib import Path
 import frontmatter  # python-frontmatter
 
 from .discover import discover  # the validated 4-bucket rule
+from .links import MAX_LINK_FANOUT, extract_links, resolve_link
 from .sections import is_chunking_candidate, split_sections, token_est as _token_est_shared
 
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
@@ -97,6 +98,7 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
     _disambiguate_titles(rows)          # rl-stocks collision fix
     _insert(conn, rows)
     edge_result = _build_colocation_edges(conn, rows)  # decision B, parent-scoped, size-capped
+    link_result = _build_link_edges(conn, rows)  # V2: directional, doc-level, hub-capped
 
     conn.commit()
     stats = {
@@ -104,6 +106,9 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
         "duplicates_dropped": dupes_dropped,
         "colocation_groups_skipped": edge_result["skipped_groups"],
         "files_with_no_colocation_edges": edge_result["skipped_files"],
+        "link_edges": link_result["edges"],
+        "dead_links": link_result["dead_links"],
+        "link_hub_docs_skipped": link_result["hub_docs_skipped"],
     }
     conn.close()
     return stats
@@ -192,6 +197,39 @@ def _build_colocation_edges(conn: sqlite3.Connection, rows: list[dict]) -> dict:
     return {"edges": n, "skipped_groups": skipped_groups, "skipped_files": skipped_files}
 
 
+def _build_link_edges(conn: sqlite3.Connection, rows: list[dict]) -> dict:
+    # Directional, doc-level only (no kind='link_section' — heading-anchor
+    # resolution isn't reliable enough to be worth the false-edge risk, and
+    # co-location is already doc-level so this keeps retrieve()'s neighbor
+    # lookups the same shape for both edge kinds). A link is an asymmetric
+    # authorial signal (A cites B; B doesn't thereby cite A back), unlike
+    # co-location's symmetric same-folder relationship — no reverse insert.
+    known_paths = {r["path"] for r in rows}
+    n, dead_links, hub_docs_skipped = 0, 0, 0
+    for r in rows:
+        targets: set[str] = set()
+        for raw_target, _anchor in extract_links(r["body"]):
+            target = resolve_link(r["path"], raw_target, known_paths)
+            if target is None:
+                dead_links += 1
+            elif target != r["path"]:
+                targets.add(target)
+        if len(targets) > MAX_LINK_FANOUT:
+            # A link-hub doc (INDEX.md/README linking to nearly everything)
+            # isn't MAX_LINK_FANOUT individually meaningful relationships —
+            # skip the whole doc's link edges rather than truncate an
+            # arbitrary subset, same rule _build_colocation_edges uses.
+            hub_docs_skipped += 1
+            continue
+        for target in targets:
+            conn.execute(
+                "INSERT OR IGNORE INTO edges(source,target,kind,weight) VALUES(?,?,?,?)",
+                (r["path"], target, "link", 1.0),
+            )
+            n += 1
+    return {"edges": n, "dead_links": dead_links, "hub_docs_skipped": hub_docs_skipped}
+
+
 DROP = """
 DROP TABLE IF EXISTS docs;
 DROP TABLE IF EXISTS chunks;
@@ -250,3 +288,7 @@ if __name__ == "__main__":
               f"{MAX_COLOCATION_GROUP} files skipped for co-location — "
               f"{result['files_with_no_colocation_edges']} files get no "
               f"co-location edges, FTS-only retrieval still applies)")
+    print(f"  {result['link_edges']} link edges, {result['dead_links']} dead links")
+    if result["link_hub_docs_skipped"]:
+        print(f"  ({result['link_hub_docs_skipped']} docs over {MAX_LINK_FANOUT} "
+              f"resolved links skipped as link hubs — no link edges from them)")

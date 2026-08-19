@@ -126,12 +126,20 @@ Any bucket can be excluded per-run with `--exclude-bucket`.
 ## Design notes
 
 - **FTS5 with porter stemming, no embeddings.** Deterministic, cheap, and
-  good enough — cross-document explicit links tested consistently near-zero
-  across every real repo this was built against.
-- **Co-location edges, not explicit links.** Files in the same directory
-  get a weak "related" edge, since that's the signal that's actually
-  present. Capped at 10 files per directory — past that, "same folder"
-  stops being a meaningful relationship and starts being noise.
+  good enough for retrieval seeding.
+- **Co-location edges.** Files in the same directory get a weak "related"
+  edge. Capped at 10 files per directory — past that, "same folder" stops
+  being a meaningful relationship and starts being noise.
+- **Link edges (V2).** Raw markdown-link coverage tested near-zero across
+  the first three audited repos, so V1 shipped without them. A follow-up
+  audit asked a narrower question — among the links that *do* exist, how
+  many connect content sharing no vocabulary with each other — and found
+  real (if thin, hub-concentrated) signal, so `kind='link'` edges were
+  added: directional (unlike co-location), doc-level, and pulled into
+  `retrieve()` unconditionally (no FTS gate) as the lowest-ranked tier,
+  below every seed and co-location neighbor. A per-doc fan-out cap drops
+  *all* link edges from a hub doc (an INDEX.md linking to everything)
+  rather than truncating an arbitrary subset.
 - **Recursive chunking, not fixed-depth.** Long docs split at H2; any
   section still oversized with real substructure splits again at H3, then
   H4. Some repos have flat catalogs of H2 sections, others have one

@@ -63,6 +63,23 @@ _NEIGHBOR_SQL = (
     "FROM docs_fts JOIN chunks c ON c.id = docs_fts.rowid "
     "WHERE docs_fts MATCH ? AND c.path = ? ORDER BY score LIMIT 1"
 )
+# No FTS gate — unconditional inclusion is the entire point of a link edge
+# (V1's neighbor rule requires the SAME query bar every seed clears; a link
+# recovers exactly the case where a relevant target shares no vocabulary
+# with the task, so gating it on that vocabulary would defeat it). Takes
+# the target doc's first chunk (document order) as a deterministic proxy
+# for "where a reader following the link would land" — a known limitation
+# for long multi-chunk targets, since there's no query to disambiguate
+# which section is relevant when inclusion doesn't depend on one.
+_LINK_SQL = (
+    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, NULL AS score "
+    "FROM chunks c WHERE c.path = ? ORDER BY c.id LIMIT 1"
+)
+MAX_LINK_NEIGHBORS_PER_SEED = 5
+# Retrieve-time cap, independent of index.py's MAX_LINK_FANOUT: that one
+# bounds what a hub doc contributes to the edges table at index time; this
+# one bounds what any single retrieval pulls from it, and is tunable
+# without reindexing.
 
 
 def retrieve(
@@ -77,7 +94,9 @@ def retrieve(
     {
       "task": str, "query_used": "AND"|"OR", "budget": int, "total_tokens": int,
       "chunks": [{"id", "path", "indexed_title", "heading", "token_est",
-                  "score", "rank", "provenance": "seed"|"neighbor", "body"}, ...]
+                  "score", "rank", "provenance": "seed"|"neighbor"|"link",
+                  "via": str | None,  # seed path that pulled in a link chunk
+                  "body"}, ...]
     }
     """
     repo_root = repo_root.resolve()
@@ -99,6 +118,7 @@ def retrieve(
     ranked: dict[int, float] = {}
     meta: dict[int, sqlite3.Row] = {}
     provenance: dict[int, str] = {}
+    via: dict[int, str] = {}
     for i, row in enumerate(seeds):
         ranked[row["id"]] = float(i)
         meta[row["id"]] = row
@@ -123,6 +143,25 @@ def retrieve(
                     ranked[nc["id"]] = i + 0.5
                     meta[nc["id"]] = nc
                     provenance[nc["id"]] = "neighbor"
+
+    # Link neighbors are unconditional (no FTS gate) — ranked strictly below
+    # every seed and every co-location neighbor (seed_limit + i + j/100),
+    # ordered within that tier by the originating seed's rank.
+    for i, row in enumerate(seeds):
+        link_targets = conn.execute(
+            "SELECT target FROM edges WHERE source = ? AND kind = 'link' "
+            "ORDER BY target LIMIT ?",
+            (row["path"], MAX_LINK_NEIGHBORS_PER_SEED),
+        ).fetchall()
+        for j, lt in enumerate(link_targets):
+            if lt["target"] in seed_paths:
+                continue
+            lc = conn.execute(_LINK_SQL, (lt["target"],)).fetchone()
+            if lc and lc["id"] not in ranked:
+                ranked[lc["id"]] = seed_limit + i + j / 100.0
+                meta[lc["id"]] = lc
+                provenance[lc["id"]] = "link"
+                via[lc["id"]] = row["path"]
 
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
     selected, running = [], 0
@@ -151,6 +190,7 @@ def retrieve(
             "score": m["score"],
             "rank": ranked[chunk_id],
             "provenance": provenance[chunk_id],
+            "via": via.get(chunk_id),
             "body": body,
         })
 

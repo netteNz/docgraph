@@ -123,6 +123,7 @@ SERVE_TEMPLATE = """<!DOCTYPE html>
   }}
   #pack .badge.seed {{ color: #3fb950; border-color: #3fb950; }}
   #pack .badge.neighbor {{ color: #d29922; border-color: #d29922; }}
+  #pack .badge.link {{ color: #58a6ff; border-color: #58a6ff; }}
 
   #stats {{
     position: fixed; bottom: 14px; left: 14px; font-size: 11px; color: #484f58;

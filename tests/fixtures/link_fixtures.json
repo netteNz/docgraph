@@ -1,0 +1,34 @@
+[
+  {
+    "bucket": "organic",
+    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "db_path": "db/docgraph.db",
+    "task": "Implementation Plan: Environment Realism Fixes",
+    "expect_include": {"path": "docs\\SENTIMENT_INTEGRATION.md", "provenance": "link"},
+    "note": "IMPLEMENTATION_PLAN_ENVIRONMENT_REALISM.md links to SENTIMENT_INTEGRATION.md (jaccard=0.10, not reachable by the source doc's own title vocabulary) — the cleanest organic case from Phase 0's audit, no hub confound."
+  },
+  {
+    "bucket": "organic",
+    "repo_root": "/d/code/agentic-development/coinbase-rl-bot",
+    "db_path": "db/coinbase_rl_bot.db",
+    "task": "coinbase-rl-bot",
+    "expect_include": {"path": "docs\\NEXT_EXPERIMENTS.md", "provenance": "link"},
+    "note": "README.md links to docs/NEXT_EXPERIMENTS.md (jaccard=0.19)."
+  },
+  {
+    "bucket": "organic",
+    "repo_root": "/d/code/agentic-development/coinbase-rl-bot",
+    "db_path": "db/coinbase_rl_bot.db",
+    "task": "NEXT_EXPERIMENTS btc post-v3 program",
+    "expect_include": {"path": "HANDOFF.md", "provenance": "link"},
+    "note": "docs/NEXT_EXPERIMENTS.md links to HANDOFF.md (jaccard=0.33)."
+  },
+  {
+    "bucket": "hub",
+    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "db_path": "db/docgraph.db",
+    "task": "Documentation Index",
+    "expect_exclude": {"via": "docs\\INDEX.md"},
+    "note": "docs/INDEX.md resolves 12 distinct link targets, over MAX_LINK_FANOUT=10 — index.py must skip ALL of its link edges rather than partially truncate. This fixture asserts no returned chunk has provenance=link with via=docs\\INDEX.md, i.e. the hub genuinely contributes zero link edges, not just a capped subset."
+  }
+]
