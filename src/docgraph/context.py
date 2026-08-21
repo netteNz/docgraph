@@ -24,6 +24,8 @@ from pathlib import Path
 
 import frontmatter
 
+from .code_chunks import extract_chunk as _extract_code_chunk
+from .code_refs import CODE_EXTENSIONS, split_code_key
 from .sections import extract_section
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
@@ -81,14 +83,29 @@ MAX_LINK_NEIGHBORS_PER_SEED = 5
 # one bounds what any single retrieval pulls from it, and is tunable
 # without reindexing.
 
-# Same shape as _LINK_SQL — trivial for code since there's exactly one chunk
-# per code file today, but kept identical in case whole-file slicing is
-# added later.
-_CODE_SQL = (
+# V4: one code file can now be multiple chunks (def/class-boundary sliced).
+# _CODE_CHUNK_SQL fetches one specific chunk by (path, heading) — the
+# symbol-resolved case; _CODE_FILE_CHUNKS_SQL fetches every chunk for a
+# path in document order — the filename-only fallback, and (since a
+# non-sliced file has exactly one chunk row) also what makes V3's old
+# single-chunk behavior fall out unchanged for files that were never
+# chunking candidates.
+_CODE_CHUNK_SQL = (
     "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, NULL AS score "
-    "FROM chunks c WHERE c.path = ? ORDER BY c.id LIMIT 1"
+    "FROM chunks c WHERE c.path = ? AND c.heading IS ? ORDER BY c.id LIMIT 1"
 )
+_CODE_FILE_CHUNKS_SQL = (
+    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, NULL AS score "
+    "FROM chunks c WHERE c.path = ? ORDER BY c.id"
+)
+_SYMBOL_NEIGHBORS_SQL = "SELECT target FROM edges WHERE source = ? AND kind = 'symbol'"
 MAX_CODE_NEIGHBORS_PER_SEED = 5
+MAX_SYMBOL_FANOUT = 5
+# Retrieve-time, tunable without reindexing (like MAX_CODE_NEIGHBORS_PER_SEED).
+# Skip-not-truncate: if a symbol-resolved chunk's one-hop expansion (preamble
+# + seed + same-name neighbors) would exceed this, the WHOLE expansion is
+# discarded and degraded to the filename-only fallback (all chunks in the
+# file, document order) rather than truncated to an arbitrary subset.
 
 
 def retrieve(
@@ -183,14 +200,43 @@ def retrieve(
             (row["path"], MAX_CODE_NEIGHBORS_PER_SEED),
         ).fetchall()
         for j, ct in enumerate(code_targets):
-            if ct["target"] in seed_paths:
+            code_path, heading = split_code_key(ct["target"])
+            if code_path in seed_paths:
                 continue
-            cc = conn.execute(_CODE_SQL, (ct["target"],)).fetchone()
-            if cc and cc["id"] not in ranked:
-                ranked[cc["id"]] = CODE_TIER_BASE + i + j / 100.0
-                meta[cc["id"]] = cc
-                provenance[cc["id"]] = "code_ref"
-                via[cc["id"]] = row["path"]
+
+            if heading is not None:
+                # Symbol-resolved: seed on that chunk, one-hop expand over
+                # kind='symbol' edges within the same file, always prepend
+                # the preamble. If the resulting group is too big, discard
+                # the expansion and degrade to the filename-only group
+                # below (skip-not-truncate, not an arbitrary partial slice).
+                seed_chunk = conn.execute(_CODE_CHUNK_SQL, (code_path, heading)).fetchone()
+                if seed_chunk is None:
+                    continue  # heading vanished since indexing — fail open by skipping
+                neighbor_rows = conn.execute(_SYMBOL_NEIGHBORS_SQL, (ct["target"],)).fetchall()
+                neighbor_chunks = []
+                for nr in neighbor_rows:
+                    n_path, n_heading = split_code_key(nr["target"])
+                    nc = conn.execute(_CODE_CHUNK_SQL, (n_path, n_heading)).fetchone()
+                    if nc:
+                        neighbor_chunks.append(nc)
+                preamble = conn.execute(_CODE_CHUNK_SQL, (code_path, None)).fetchone()
+                group = ([preamble] if preamble else []) + [seed_chunk] + neighbor_chunks
+                if len(group) > MAX_SYMBOL_FANOUT:
+                    group = conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+            else:
+                # Filename-only: preamble + every chunk in the file, in
+                # document order, budget-trimmed downstream same as V3's
+                # whole-file inclusion — just now cut at def boundaries
+                # instead of mid-function.
+                group = conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+
+            for k, cc in enumerate(group):
+                if cc["id"] not in ranked:
+                    ranked[cc["id"]] = CODE_TIER_BASE + i + j / 100.0 + k / 10000.0
+                    meta[cc["id"]] = cc
+                    provenance[cc["id"]] = "code_ref"
+                    via[cc["id"]] = row["path"]
 
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
     selected, running = [], 0
@@ -207,7 +253,14 @@ def retrieve(
         try:
             raw = (repo_root / m["path"]).read_text(encoding="utf-8", errors="replace")
             full_body = frontmatter.loads(raw).content
-            body = extract_section(full_body, m["heading"]).strip()
+            if Path(m["path"]).suffix.lstrip(".") in CODE_EXTENSIONS:
+                # Code chunks have no markdown headings, so extract_section
+                # would always short-circuit to the whole file — that was
+                # coincidentally correct under V3's whole-file-only model
+                # and stops being correct now that code files are sliced.
+                body = _extract_code_chunk(full_body, m["heading"]).strip()
+            else:
+                body = extract_section(full_body, m["heading"]).strip()
         except OSError as e:
             body = f"[could not read source: {e}]"
         chunks.append({

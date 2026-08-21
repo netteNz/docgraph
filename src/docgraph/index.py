@@ -26,8 +26,12 @@ from pathlib import Path
 
 import frontmatter  # python-frontmatter
 
+from .code_chunks import CodeChunk
+from .code_chunks import build_chunks as _build_code_chunks
+from .code_chunks import is_chunking_candidate as _is_code_chunking_candidate
 from .code_refs import (
-    CODE_EXTENSIONS, MAX_CODE_REFS_PER_DOC, extract_code_mentions, resolve_code_ref,
+    CODE_EXTENSIONS, MAX_CODE_REFS_PER_DOC, extract_code_mentions, extract_symbol_mentions,
+    resolve_code_ref, resolve_symbol_ref, split_code_key,
 )
 from .discover import DEFAULT_EXCLUDES, discover  # the validated 4-bucket rule
 from .links import MAX_LINK_FANOUT, extract_links, resolve_link
@@ -102,7 +106,7 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
     _insert(conn, rows)
     edge_result = _build_colocation_edges(conn, rows)  # decision B, parent-scoped, size-capped
     link_result = _build_link_edges(conn, rows)  # V2: directional, doc-level, hub-capped
-    code_result = _build_code_edges(conn, repo_root, rows)  # V3: directional, doc-level, hub-capped
+    code_result = _build_code_edges(conn, repo_root, rows)  # V3/V4: directional, doc-level, hub-capped
 
     conn.commit()
     stats = {
@@ -118,6 +122,7 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
         "dead_code_refs": code_result["dead_code_refs"],
         "ambiguous_code_refs": code_result["ambiguous_code_refs"],
         "code_hub_docs_skipped": code_result["hub_docs_skipped"],
+        "symbol_edges": code_result["symbol_edges"],
     }
     conn.close()
     return stats
@@ -250,6 +255,36 @@ def _discover_code_files(repo_root: Path) -> set[str]:
     return found
 
 
+HUB_NAME_FANOUT = 5
+# V4: a module-level name referenced by more than this many chunks in one
+# file gets NO symbol edges from that name at all — skip-not-truncate, same
+# rule as MAX_LINK_FANOUT/MAX_CODE_REFS_PER_DOC/MAX_COLOCATION_GROUP. Added
+# after a real-corpus fanout audit (docs/HANDOFF.md's V4 entry) found a
+# Flask `app`-style singleton referenced by every chunk in a file, which
+# would otherwise wire the whole file into one clique and make retrieve()'s
+# MAX_SYMBOL_FANOUT trip on every seed touching that file.
+
+
+def _code_chunks_for(
+    code_path: str, repo_root: Path, cache: dict[str, tuple],
+) -> tuple[str, list[CodeChunk], dict[str, set[str]], dict[str, str]]:
+    """Read + chunk one code file, memoized per index run so a file
+    referenced by multiple docs is only ever parsed once (preserves the
+    existing "reference-driven, not index-all-code" principle — this is
+    only ever called for files some doc already filename-references)."""
+    if code_path in cache:
+        return cache[code_path]
+    body = (repo_root / code_path).read_text(encoding="utf-8", errors="replace")
+    if _is_code_chunking_candidate(body):
+        chunks, used_names, defining_heading = _build_code_chunks(body)
+    else:
+        chunks = [CodeChunk(None, body, _token_est_shared(body))]
+        used_names, defining_heading = {}, {}
+    result = (body, chunks, used_names, defining_heading)
+    cache[code_path] = result
+    return result
+
+
 def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict]) -> dict:
     # Reference-driven: a code file only gets inserted into docs/chunks if at
     # least one doc actually mentions it — this is not "index all code in
@@ -266,9 +301,10 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
     n, dead_refs, ambiguous_refs, hub_docs_skipped = 0, 0, 0, 0
     inserted: dict[str, int] = {}  # code path -> doc_id
     per_doc_targets: dict[str, set[str]] = {}
+    chunk_cache: dict[str, tuple] = {}
 
     for r in rows:
-        targets: set[str] = set()
+        filename_targets: set[str] = set()
         for raw_target in extract_code_mentions(r["body"]):
             resolved, status = resolve_code_ref(r["path"], raw_target, known_code_paths)
             if status == "dead":
@@ -276,7 +312,38 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
             elif status == "ambiguous":
                 ambiguous_refs += 1
             elif resolved is not None and resolved not in doc_paths:
-                targets.add(resolved)
+                filename_targets.add(resolved)
+
+        # V4: try to sharpen each filename target into a specific symbol
+        # chunk via backticked symbol mentions in the same doc. A mention
+        # resolving into exactly one (file, heading) pair replaces that
+        # file's bare-path target with a "path#heading" composite; 2+
+        # matches across different candidate files is tracked as ambiguous
+        # (same bucket as a filename ambiguity — could be made real by
+        # disambiguating); 0 matches is not evidence of anything and is
+        # silently dropped, leaving the bare-path (V3) fallback in place.
+        symbol_targets: set[str] = set()
+        resolved_symbol_files: set[str] = set()
+        if filename_targets:
+            for mention in extract_symbol_mentions(r["body"]):
+                matches = []
+                for code_path in filename_targets:
+                    try:
+                        _, chunks, _, _ = _code_chunks_for(code_path, repo_root, chunk_cache)
+                    except OSError:
+                        continue
+                    headings = {c.heading for c in chunks if c.heading is not None}
+                    heading = resolve_symbol_ref(mention, headings)
+                    if heading is not None:
+                        matches.append((code_path, heading))
+                if len(matches) == 1:
+                    code_path, heading = matches[0]
+                    symbol_targets.add(f"{code_path}#{heading}")
+                    resolved_symbol_files.add(code_path)
+                elif len(matches) > 1:
+                    ambiguous_refs += 1
+
+        targets = (filename_targets - resolved_symbol_files) | symbol_targets
         if not targets:
             continue
         if len(targets) > MAX_CODE_REFS_PER_DOC:
@@ -286,27 +353,66 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
             continue
         per_doc_targets[r["path"]] = targets
 
-    for targets in per_doc_targets.values():
-        for code_path in targets:
-            if code_path not in inserted:
-                code_file = repo_root / code_path
-                try:
-                    body = code_file.read_text(encoding="utf-8", errors="replace")
-                except OSError:
-                    continue
-                filename = Path(code_path).name
-                cur = conn.execute(
-                    "INSERT INTO docs(path,parent,bucket,title,indexed_title,hash,bytes,token_est) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
-                    (code_path, str(Path(code_path).parent), "code", filename, filename,
-                     hashlib.sha256(body.encode()).hexdigest()[:12], len(body), _token_est(body)),
-                )
-                doc_id = cur.lastrowid
-                conn.execute(
-                    "INSERT INTO chunks(doc_id,path,heading,indexed_title,token_est) VALUES(?,?,?,?,?)",
-                    (doc_id, code_path, None, filename, _token_est_shared(body)),
-                )
-                inserted[code_path] = doc_id
+    referenced_files = {
+        split_code_key(t)[0]
+        for targets in per_doc_targets.values()
+        for t in targets
+    }
+    for code_path in referenced_files:
+        if code_path in inserted:
+            continue
+        try:
+            body, chunks, used_names, defining_heading = _code_chunks_for(code_path, repo_root, chunk_cache)
+        except OSError:
+            continue
+        filename = Path(code_path).name
+        cur = conn.execute(
+            "INSERT INTO docs(path,parent,bucket,title,indexed_title,hash,bytes,token_est) "
+            "VALUES(?,?,?,?,?,?,?,?)",
+            (code_path, str(Path(code_path).parent), "code", filename, filename,
+             hashlib.sha256(body.encode()).hexdigest()[:12], len(body), _token_est(body)),
+        )
+        doc_id = cur.lastrowid
+        for c in chunks:
+            # § for the file-boundary separator (matches _insert's markdown
+            # convention), " > " reserved for intra-file nesting (matches
+            # code_chunks.py's "Class > method" heading shape) — same two
+            # separators, same meaning, in both pipelines.
+            indexed_title = filename if c.heading is None else f"{filename} § {c.heading}"
+            conn.execute(
+                "INSERT INTO chunks(doc_id,path,heading,indexed_title,token_est) VALUES(?,?,?,?,?)",
+                (doc_id, code_path, c.heading, indexed_title, c.token_est),
+            )
+        inserted[code_path] = doc_id
+
+        # V4: kind='symbol' edges from this file's shared module-level
+        # names. A def/class's own chunk is always a participant for its
+        # own name (defining_heading) — this is what connects a function to
+        # its sole caller even when the function never references itself.
+        participants: dict[str, set[str]] = {}
+        for heading, names in used_names.items():
+            for name in names:
+                participants.setdefault(name, set()).add(heading)
+        for name, heading in defining_heading.items():
+            participants.setdefault(name, set()).add(heading)
+
+        for name, headings in participants.items():
+            if len(headings) > HUB_NAME_FANOUT:
+                # Hub name (e.g. a Flask `app`, a shared `logger`) — skip
+                # entirely rather than connect nearly the whole file.
+                continue
+            ordered = sorted(headings)
+            for i, h1 in enumerate(ordered):
+                for h2 in ordered[i + 1:]:
+                    key1, key2 = f"{code_path}#{h1}", f"{code_path}#{h2}"
+                    conn.execute(
+                        "INSERT OR IGNORE INTO edges(source,target,kind,weight) VALUES(?,?,?,?)",
+                        (key1, key2, "symbol", 1.0),
+                    )
+                    conn.execute(
+                        "INSERT OR IGNORE INTO edges(source,target,kind,weight) VALUES(?,?,?,?)",
+                        (key2, key1, "symbol", 1.0),
+                    )
 
     for source, targets in per_doc_targets.items():
         for target in targets:
@@ -316,10 +422,13 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
             )
             n += 1
 
+    symbol_edges = conn.execute("SELECT COUNT(*) FROM edges WHERE kind='symbol'").fetchone()[0]
+
     return {
         "edges": n, "code_files_indexed": len(inserted),
         "dead_code_refs": dead_refs, "ambiguous_code_refs": ambiguous_refs,
         "hub_docs_skipped": hub_docs_skipped,
+        "symbol_edges": symbol_edges,
     }
 
 
@@ -390,3 +499,5 @@ if __name__ == "__main__":
     if result["code_hub_docs_skipped"]:
         print(f"  ({result['code_hub_docs_skipped']} docs over {MAX_CODE_REFS_PER_DOC} "
               f"resolved code refs skipped as code hubs — no code_ref edges from them)")
+    print(f"  {result['symbol_edges']} symbol edges (V4, intra-file, "
+          f"HUB_NAME_FANOUT={HUB_NAME_FANOUT})")

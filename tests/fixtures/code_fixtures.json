@@ -1,0 +1,105 @@
+[
+  {
+    "name": "happy_path_chunking",
+    "source_file": "happy_path.py",
+    "check": "candidate_and_chunks",
+    "expect": {
+      "is_candidate": true,
+      "headings": [null, "train_step", "evaluate"],
+      "shared_name": "MAX_EPISODES",
+      "shared_by": ["train_step", "evaluate"]
+    },
+    "note": "Two functions share a module-level constant; both get their own chunk and both list it in used_names."
+  },
+  {
+    "name": "happy_path_symbol_edge",
+    "source_file": "happy_path.py",
+    "check": "index_symbol_edge",
+    "expect": {
+      "edge_between": ["train_step", "evaluate"],
+      "bidirectional": true
+    },
+    "note": "After index.build against a disposable temp repo, a kind='symbol' edge connects train_step and evaluate both directions."
+  },
+  {
+    "name": "common_helper_trap_hub_suppressed",
+    "source_file": "common_helper_trap.py",
+    "check": "hub_name_fanout",
+    "expect": {
+      "name": "log_metrics",
+      "participant_count": 8,
+      "exceeds_hub_name_fanout": true,
+      "symbol_edges_from_name": 0
+    },
+    "note": "log_metrics is referenced by 8 chunks (itself + 7 callers) -- over HUB_NAME_FANOUT (5) -- so index.py must skip ALL symbol edges from that name."
+  },
+  {
+    "name": "common_helper_trap_retrieve_stays_minimal",
+    "source_file": "common_helper_trap.py",
+    "check": "retrieve_group_size",
+    "expect": {
+      "seed_heading": "log_metrics",
+      "max_group_size": 2,
+      "note": "preamble + seed chunk only -- since HUB_NAME_FANOUT already suppressed log_metrics's symbol edges at index time, retrieve() never even has a neighbor to expand to. This is a stronger result than the original spec anticipated (\"falls back to whole file\"): the index-time fix keeps the pack minimal instead of needing the retrieve-time MAX_SYMBOL_FANOUT fallback to fire at all for this case."
+    }
+  },
+  {
+    "name": "param_binding_positive",
+    "source_file": "param_binding.py",
+    "check": "used_names_contains",
+    "expect": {
+      "heading": "train",
+      "contains": "ReplayBuffer"
+    },
+    "note": "A `replay_buffer` parameter case-normalizes to the module-level `ReplayBuffer` class even though it never appears as a plain Name load."
+  },
+  {
+    "name": "param_binding_negative_noise_filter",
+    "source_file": "param_binding.py",
+    "check": "used_names_excludes_all_but",
+    "expect": {
+      "heading": "train",
+      "only": ["ReplayBuffer"]
+    },
+    "note": "The unrelated `data` parameter must not resolve to anything -- used_names['train'] contains ReplayBuffer and nothing else."
+  },
+  {
+    "name": "shared_locals_only_no_edge",
+    "source_file": "shared_locals_only.py",
+    "check": "used_names_empty",
+    "expect": {
+      "headings": ["fn_a", "fn_b"]
+    },
+    "note": "Both functions share only a same-named LOCAL variable (never module-level) -- used_names must be empty for both, so no symbol edge can ever form."
+  },
+  {
+    "name": "syntax_error_fallback",
+    "source_file": "broken_syntax.py",
+    "check": "syntax_error_fallback",
+    "expect": {
+      "is_candidate": false,
+      "extract_returns_whole_body": true
+    },
+    "note": "Deliberately broken Python must not crash is_chunking_candidate/build_chunks/extract_chunk -- falls back to whole-file inclusion."
+  },
+  {
+    "name": "sub_threshold_never_sliced",
+    "source_file": "sub_threshold.py",
+    "check": "not_candidate",
+    "expect": {
+      "is_candidate": false
+    },
+    "note": "3 small functions under the token threshold -- must stay one whole-file chunk even though the def count alone would otherwise qualify."
+  },
+  {
+    "name": "env_key_exclusion",
+    "source_file": "env_key_exclusion.py",
+    "check": "used_names_excludes",
+    "expect": {
+      "heading": "uses_both",
+      "excludes": ["API_KEY", "ANOTHER_SECRET"],
+      "includes": ["REAL_CONST"]
+    },
+    "note": "os.getenv()/os.environ[...] sourced module-level assignments must not be treated as connective constants; a real constant still is."
+  }
+]

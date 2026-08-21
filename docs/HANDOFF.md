@@ -1,6 +1,82 @@
 # DocGraph — Session Handoff
 
-**Last updated**: 2026-08-20
+**Last updated**: 2026-08-21
+
+## 2026-08-21 — V4 def/class-boundary code slicing + symbol-trace expansion: added, evaluated against rl-stocks
+
+Added `code_chunks.py` (new module, mirrors `sections.py`'s role for Python
+source via stdlib `ast` — no tree-sitter): def/class-boundary chunking with
+a preamble chunk, plus a same-pass intra-file symbol table (`used_names` per
+chunk: constants, callees, case-normalized param↔class bindings, excluding
+`os.getenv`/`os.environ`-sourced assignments and anything purely local).
+`kind='symbol'` edges (chunk-to-chunk, intra-file, bidirectional) use a
+composite `f"{path}#{heading}"` key in the existing `edges.source`/`target`
+columns — no schema change (`#` was already the codebase's separator for
+"path plus a location within it", per `links.py`'s anchor splitting).
+`code_refs.py` gained `extract_symbol_mentions`/`resolve_symbol_ref`
+(inline-backtick-only, exact match against one file's chunk headings — no
+fenced-block scanning, no fuzzy/prose matching); a resolved symbol mention
+sharpens a `code_ref` edge's target from a bare file path to `path#heading`.
+`retrieve()`'s code-neighbor tier now does one-hop `symbol`-edge expansion
+(preamble + seed + connected chunks) for symbol-resolved targets, capped by
+`MAX_SYMBOL_FANOUT=5` (retrieve-time, skip-not-truncate: exceeding it
+discards the expansion and degrades to the filename-only fallback — all
+chunks in document order — rather than an arbitrary partial slice).
+
+**Phase 0 audit (before writing any code)**: scripted a check of the three
+already-indexed corpora using their existing V3 `code_ref` edges to scope
+which files/mentions to check. 7 of 9 docs with a resolvable inline-backtick
+symbol mention resolve specifically into a chunking-candidate file (real,
+spot-checked matches — `IndicatorEngine` in trading-dashboard,
+`ExitManager`/`reset()`/`should_exit()` in rl-stocks' `src/exit_manager.py`)
+— comfortably clears the stated kill criterion (fewer than 3 → shelve).
+Separately, 20/46 (43%) of all code_ref target files are chunking
+candidates on their own, so the whole-file→sliced change benefits docs with
+no symbol mention too.
+
+**Follow-up hub-name audit (before finalizing the design)**: computed
+per-name fanout across all 19 rl-stocks/trading-dashboard chunking-candidate
+files and found the concern was real, not hypothetical — `agent-api/api/
+main.py`'s module-level `app` object (a Flask-style singleton) is referenced
+by 9/9 chunks, which would wire the entire file into one clique and make
+`MAX_SYMBOL_FANOUT` trip on every seed touching it; `src/news_data.py`'s
+`SentimentResult` dataclass similarly at 6/15. Fix: `HUB_NAME_FANOUT=5`
+(index-time, in `index.py`) — a module-level name referenced by more than
+this many chunks in one file gets **no** symbol edges from that name at
+all, skip-not-truncate, same rule as `MAX_LINK_FANOUT`/
+`MAX_CODE_REFS_PER_DOC`/`MAX_COLOCATION_GROUP`. Confirmed on the real
+rebuilt index: `main.py` produces 0 symbol edges, `news_data.py` produces 0
+from `SentimentResult` but 50 from its other, non-hub shared names.
+
+**Rebuild stats** (`db/docgraph.db`, 72 files, rl-stocks): 94 `code_ref`
+edges (unchanged from V3), 542 `symbol` edges, `ambiguous_code_refs` rose
+from 203 to 204 (one new symbol-resolution ambiguity, folded into the same
+counter V3 already reported — same semantic bucket, not a new one).
+
+**Status: implemented and fixture-tested, NOT yet validated in real use**
+— same caveat V2 and V3 shipped with. `tests/run_code_fixtures.py` (10
+assertions across 9 fixture files under `tests/fixtures/code_fixtures/`,
+synthetic sources rather than real-repo pointers — V4's cases are precise
+structural conditions, not emergent corpus properties) all pass. All of
+`tests/run_link_fixtures.py`'s existing buckets (organic, hub, V3's code)
+still pass unchanged after reindexing. One fixture's expectation changed
+from the original design during implementation: the "common helper trap"
+case (a `log_metrics` helper called by 7 others) was expected to hit
+`MAX_SYMBOL_FANOUT`'s retrieve-time fallback and return the whole file;
+in practice `HUB_NAME_FANOUT` already suppresses `log_metrics`'s edges at
+*index* time, so `retrieve()` never even reaches a neighbor to expand to
+and returns just `[preamble, seed chunk]` — smaller and more precise than
+the original expectation, not a bug, but worth knowing the two caps
+overlap in coverage for this exact shape of hub.
+
+Watch real `docgraph_context` use for the same open question V2/V3 have:
+does a symbol-expanded chunk ever change what the agent does, and does a
+sliced-but-unexpanded (filename-only fallback) pack read any better than
+V3's whole-file inclusion did.
+
+Deferred, same discipline as V2/V3: prose symbol resolution (no backticks),
+cross-file symbol resolution (single-file scope only), non-Python
+languages, and type inference/dataflow analysis.
 
 ## 2026-08-20 — V3 doc->code reference edges: added, evaluated against rl-stocks
 
