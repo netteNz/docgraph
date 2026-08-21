@@ -26,7 +26,10 @@ from pathlib import Path
 
 import frontmatter  # python-frontmatter
 
-from .discover import discover  # the validated 4-bucket rule
+from .code_refs import (
+    CODE_EXTENSIONS, MAX_CODE_REFS_PER_DOC, extract_code_mentions, resolve_code_ref,
+)
+from .discover import DEFAULT_EXCLUDES, discover  # the validated 4-bucket rule
 from .links import MAX_LINK_FANOUT, extract_links, resolve_link
 from .sections import is_chunking_candidate, split_sections, token_est as _token_est_shared
 
@@ -99,6 +102,7 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
     _insert(conn, rows)
     edge_result = _build_colocation_edges(conn, rows)  # decision B, parent-scoped, size-capped
     link_result = _build_link_edges(conn, rows)  # V2: directional, doc-level, hub-capped
+    code_result = _build_code_edges(conn, repo_root, rows)  # V3: directional, doc-level, hub-capped
 
     conn.commit()
     stats = {
@@ -109,6 +113,11 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
         "link_edges": link_result["edges"],
         "dead_links": link_result["dead_links"],
         "link_hub_docs_skipped": link_result["hub_docs_skipped"],
+        "code_edges": code_result["edges"],
+        "code_files_indexed": code_result["code_files_indexed"],
+        "dead_code_refs": code_result["dead_code_refs"],
+        "ambiguous_code_refs": code_result["ambiguous_code_refs"],
+        "code_hub_docs_skipped": code_result["hub_docs_skipped"],
     }
     conn.close()
     return stats
@@ -230,6 +239,90 @@ def _build_link_edges(conn: sqlite3.Connection, rows: list[dict]) -> dict:
     return {"edges": n, "dead_links": dead_links, "hub_docs_skipped": hub_docs_skipped}
 
 
+def _discover_code_files(repo_root: Path) -> set[str]:
+    found = set()
+    for ext in CODE_EXTENSIONS:
+        for p in repo_root.rglob(f"*.{ext}"):
+            rel = p.relative_to(repo_root)
+            if any(part in DEFAULT_EXCLUDES for part in rel.parts):
+                continue
+            found.add(str(rel))
+    return found
+
+
+def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict]) -> dict:
+    # Reference-driven: a code file only gets inserted into docs/chunks if at
+    # least one doc actually mentions it — this is not "index all code in
+    # the repo." No docs_fts row for code chunks, which is the key mechanism
+    # that keeps code out of FTS seeding/co-location matching entirely
+    # (_SEED_SQL/_NEIGHBOR_SQL both join through docs_fts, so a code chunk
+    # with no FTS row is structurally unreachable except via the code_ref
+    # edge). Code files skip the generic dedup/co-location pipeline entirely
+    # — a fully separate insertion path so this can't destabilize the
+    # existing markdown pipeline.
+    known_code_paths = _discover_code_files(repo_root)
+    doc_paths = {r["path"] for r in rows}
+
+    n, dead_refs, ambiguous_refs, hub_docs_skipped = 0, 0, 0, 0
+    inserted: dict[str, int] = {}  # code path -> doc_id
+    per_doc_targets: dict[str, set[str]] = {}
+
+    for r in rows:
+        targets: set[str] = set()
+        for raw_target in extract_code_mentions(r["body"]):
+            resolved, status = resolve_code_ref(r["path"], raw_target, known_code_paths)
+            if status == "dead":
+                dead_refs += 1
+            elif status == "ambiguous":
+                ambiguous_refs += 1
+            elif resolved is not None and resolved not in doc_paths:
+                targets.add(resolved)
+        if not targets:
+            continue
+        if len(targets) > MAX_CODE_REFS_PER_DOC:
+            # Same skip-entirely-not-truncate rule as link/colocation hubs —
+            # no evidence yet for which N of a doc's code refs matter more.
+            hub_docs_skipped += 1
+            continue
+        per_doc_targets[r["path"]] = targets
+
+    for targets in per_doc_targets.values():
+        for code_path in targets:
+            if code_path not in inserted:
+                code_file = repo_root / code_path
+                try:
+                    body = code_file.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                filename = Path(code_path).name
+                cur = conn.execute(
+                    "INSERT INTO docs(path,parent,bucket,title,indexed_title,hash,bytes,token_est) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (code_path, str(Path(code_path).parent), "code", filename, filename,
+                     hashlib.sha256(body.encode()).hexdigest()[:12], len(body), _token_est(body)),
+                )
+                doc_id = cur.lastrowid
+                conn.execute(
+                    "INSERT INTO chunks(doc_id,path,heading,indexed_title,token_est) VALUES(?,?,?,?,?)",
+                    (doc_id, code_path, None, filename, _token_est_shared(body)),
+                )
+                inserted[code_path] = doc_id
+
+    for source, targets in per_doc_targets.items():
+        for target in targets:
+            conn.execute(
+                "INSERT OR IGNORE INTO edges(source,target,kind,weight) VALUES(?,?,?,?)",
+                (source, target, "code_ref", 1.0),
+            )
+            n += 1
+
+    return {
+        "edges": n, "code_files_indexed": len(inserted),
+        "dead_code_refs": dead_refs, "ambiguous_code_refs": ambiguous_refs,
+        "hub_docs_skipped": hub_docs_skipped,
+    }
+
+
 DROP = """
 DROP TABLE IF EXISTS docs;
 DROP TABLE IF EXISTS chunks;
@@ -292,3 +385,8 @@ if __name__ == "__main__":
     if result["link_hub_docs_skipped"]:
         print(f"  ({result['link_hub_docs_skipped']} docs over {MAX_LINK_FANOUT} "
               f"resolved links skipped as link hubs — no link edges from them)")
+    print(f"  {result['code_edges']} code_ref edges, {result['code_files_indexed']} code files indexed, "
+          f"{result['dead_code_refs']} dead code refs, {result['ambiguous_code_refs']} ambiguous code refs")
+    if result["code_hub_docs_skipped"]:
+        print(f"  ({result['code_hub_docs_skipped']} docs over {MAX_CODE_REFS_PER_DOC} "
+              f"resolved code refs skipped as code hubs — no code_ref edges from them)")

@@ -81,6 +81,15 @@ MAX_LINK_NEIGHBORS_PER_SEED = 5
 # one bounds what any single retrieval pulls from it, and is tunable
 # without reindexing.
 
+# Same shape as _LINK_SQL — trivial for code since there's exactly one chunk
+# per code file today, but kept identical in case whole-file slicing is
+# added later.
+_CODE_SQL = (
+    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, NULL AS score "
+    "FROM chunks c WHERE c.path = ? ORDER BY c.id LIMIT 1"
+)
+MAX_CODE_NEIGHBORS_PER_SEED = 5
+
 
 def retrieve(
     repo_root: Path,
@@ -94,8 +103,8 @@ def retrieve(
     {
       "task": str, "query_used": "AND"|"OR", "budget": int, "total_tokens": int,
       "chunks": [{"id", "path", "indexed_title", "heading", "token_est",
-                  "score", "rank", "provenance": "seed"|"neighbor"|"link",
-                  "via": str | None,  # seed path that pulled in a link chunk
+                  "score", "rank", "provenance": "seed"|"neighbor"|"link"|"code_ref",
+                  "via": str | None,  # seed path that pulled in a link/code chunk
                   "body"}, ...]
     }
     """
@@ -163,6 +172,26 @@ def retrieve(
                 provenance[lc["id"]] = "link"
                 via[lc["id"]] = row["path"]
 
+    # Code neighbors are unconditional too, ranked strictly below the entire
+    # link tier (which occupies [seed_limit, seed_limit*2)) regardless of
+    # seed_limit's value.
+    CODE_TIER_BASE = seed_limit * 2
+    for i, row in enumerate(seeds):
+        code_targets = conn.execute(
+            "SELECT target FROM edges WHERE source = ? AND kind = 'code_ref' "
+            "ORDER BY target LIMIT ?",
+            (row["path"], MAX_CODE_NEIGHBORS_PER_SEED),
+        ).fetchall()
+        for j, ct in enumerate(code_targets):
+            if ct["target"] in seed_paths:
+                continue
+            cc = conn.execute(_CODE_SQL, (ct["target"],)).fetchone()
+            if cc and cc["id"] not in ranked:
+                ranked[cc["id"]] = CODE_TIER_BASE + i + j / 100.0
+                meta[cc["id"]] = cc
+                provenance[cc["id"]] = "code_ref"
+                via[cc["id"]] = row["path"]
+
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
     selected, running = [], 0
     for chunk_id, _rank in ordered:
@@ -223,7 +252,13 @@ def _render(data: dict) -> str:
         loc = c["path"] + (f" § {c['heading']}" if c["heading"] else "")
         out.append(f"Source: {loc}")
         out.append("")
-        out.append(c["body"])
+        if c["provenance"] == "code_ref":
+            lang = Path(c["path"]).suffix.lstrip(".")
+            out.append(f"```{lang}")
+            out.append(c["body"])
+            out.append("```")
+        else:
+            out.append(c["body"])
         out.append("")
     return "\n".join(out)
 

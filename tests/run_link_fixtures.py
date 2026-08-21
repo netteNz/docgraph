@@ -1,9 +1,10 @@
 """
-Phase 3 evaluation for the V2 link-edge hypothesis. Plain script, no pytest
-dependency (pyproject.toml only declares python-frontmatter and mcp; this is
-a small, finite fixture list, not a growing regression suite yet).
+Evaluation harness for the link-edge (V2) and code-ref (V3) hypotheses.
+Plain script, no pytest dependency (pyproject.toml only declares
+python-frontmatter and mcp; this is a small, finite fixture list, not a
+growing regression suite yet).
 
-Fixtures are split into two buckets, reported SEPARATELY and never averaged:
+Fixtures are split into buckets, reported SEPARATELY and never averaged:
 
   organic — a link connects lexically-disjoint content with no hub doc in
     the way. This is the original V2 thesis in its cleanest form. Only ~3
@@ -15,6 +16,10 @@ Fixtures are split into two buckets, reported SEPARATELY and never averaged:
     an INDEX.md. Phase 0 found hub-driven pairs dominate raw disjoint counts
     (12 of 15 total), so this bucket answers a different question: does the
     fan-out cap actually keep a hub from leaking noise into retrieval.
+
+  code    — V3's doc->code filename-mention edges, evaluated against the
+    rl-stocks corpus (real positive resolutions, a genuine basename-ambiguity
+    case, and a negative control doc with zero code references).
 
 Run: python tests/run_link_fixtures.py
 """

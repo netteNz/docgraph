@@ -124,6 +124,7 @@ SERVE_TEMPLATE = """<!DOCTYPE html>
   #pack .badge.seed {{ color: #3fb950; border-color: #3fb950; }}
   #pack .badge.neighbor {{ color: #d29922; border-color: #d29922; }}
   #pack .badge.link {{ color: #58a6ff; border-color: #58a6ff; }}
+  #pack .badge.code_ref {{ color: #bc8cff; border-color: #bc8cff; }}
 
   #stats {{
     position: fixed; bottom: 14px; left: 14px; font-size: 11px; color: #484f58;
@@ -323,10 +324,17 @@ function renderPack(json) {{
   html += `<div class="packMeta">${{json.chunks.length}} chunks, ~${{json.total_tokens}} tokens (budget ${{json.budget}}, ${{json.query_used}}-matched seeds)</div>`;
   for (const c of json.chunks) {{
     const loc = c.path + (c.heading ? ` § ${{c.heading}}` : "");
+    // code_ref chunks are raw source, not markdown — fence them before
+    // handing to marked, same as context.py::_render() does for the
+    // CLI/MCP text output, so decorators/indentation/docstrings don't get
+    // mangled by markdown parsing.
+    const rendered = c.provenance === "code_ref"
+      ? marked.parse("```" + (c.path.split(".").pop() || "") + "\\n" + c.body + "\\n```")
+      : marked.parse(c.body);
     html += `<div class="chunk">
       <h3>${{escapeHtml(c.indexed_title)}}<span class="badge ${{c.provenance}}">${{c.provenance}}</span></h3>
       <div class="chunkSrc">${{escapeHtml(loc)}}</div>
-      <div class="chunkBody">${{marked.parse(c.body)}}</div>
+      <div class="chunkBody">${{rendered}}</div>
     </div>`;
   }}
   packContentEl.innerHTML = html;

@@ -1,6 +1,49 @@
 # DocGraph — Session Handoff
 
-**Last updated**: 2026-08-18
+**Last updated**: 2026-08-20
+
+## 2026-08-20 — V3 doc->code reference edges: added, evaluated against rl-stocks
+
+Added `kind='code_ref'` edges (directional, doc-level filename mentions only
+— backtick spans + fenced code blocks, no import-statement parsing, no
+symbol resolution) and a third unconditional retrieval tier in `retrieve()`
+below the entire link tier (`MAX_CODE_REFS_PER_DOC=10` index-time fan-out
+cap, `MAX_CODE_NEIGHBORS_PER_SEED=5` retrieve-time cap, both skip-not-
+truncate on hubs, `provenance="code_ref"`). New module `code_refs.py`
+mirrors `links.py`'s shape. Referenced code files are inserted into
+`docs`/`chunks` with `bucket='code'` but deliberately get **no `docs_fts`
+row** — this is what keeps code out of FTS seeding/co-location entirely, so
+a code chunk is only reachable through a `code_ref` edge. Whole-file
+inclusion only (no def/class slicing); `context.py::_render()` wraps a
+`code_ref` chunk's body in a fenced code block keyed off the file extension.
+
+**Planning corpus switched from `document_parser` to rl-stocks mid-session**
+(see plan at `wise-coalescing-fern.md`, written against document_parser) —
+rl-stocks turned out to be a better fixture source: it has real positive
+resolutions (`src/trading_agent.py`, `src/ensemble.py`, `src/trading_env.py`
+referenced by name across multiple docs), a genuine basename-ambiguity case
+(`experiments.py` bare-mentioned but resolves to both `src/experiments.py`
+*and* `src/dashboard/pages/experiments.py`), and genuine dangling refs
+(`HANDOFF.md` mentions `app.py`/`data/source.py`/`backend/indicators/
+engine.py` — none exist in this repo, apparently copy-pasted from notes
+about the trading-dashboard project).
+
+**Rebuild stats** (`db/docgraph.db`, 72 files): 94 `code_ref` edges, 37 code
+files indexed, 76 dead refs, 203 ambiguous refs (mostly `staging/` mirroring
+`src/` — real duplication in this corpus, not a bug), 4 hub docs skipped
+(over `MAX_CODE_REFS_PER_DOC`).
+
+**Status: implemented and fixture-tested, NOT yet validated in real use** —
+same caveat V2 shipped with. `tests/run_link_fixtures.py` now has a `code`
+bucket (3/3: two positive resolutions incl. one basename-fallback case, one
+negative control), but like V2's organic bucket these were derived by
+looking at the same corpus survey that motivated the feature. Watch real
+`docgraph_context` use for whether a `code_ref` chunk ever changes what the
+agent does, same open question V2 has.
+
+Deferred, same discipline as V2 deferring `link_section` anchor resolution:
+symbol-name resolution (matching prose like "the `DocumentParser` class"
+back to its file) and a def/class-boundary slicer for oversized code files.
 
 ## 2026-08-18 — V2 link edges: added, decision gate still open
 

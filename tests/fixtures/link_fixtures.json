@@ -30,5 +30,29 @@
     "task": "Documentation Index",
     "expect_exclude": {"via": "docs\\INDEX.md"},
     "note": "docs/INDEX.md resolves 12 distinct link targets, over MAX_LINK_FANOUT=10 — index.py must skip ALL of its link edges rather than partially truncate. This fixture asserts no returned chunk has provenance=link with via=docs\\INDEX.md, i.e. the hub genuinely contributes zero link edges, not just a capped subset."
+  },
+  {
+    "bucket": "code",
+    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "db_path": "db/docgraph.db",
+    "task": "exit signal todo plan",
+    "expect_include": {"path": "scripts\\analyze_reward_divergence.py", "provenance": "code_ref"},
+    "note": "EXIT_SIGNAL_TODO.md mentions scripts/analyze_reward_divergence.py in a fenced CLI-invocation block (no markdown-link syntax) — V3's filename-mention extraction, not V2's link extraction."
+  },
+  {
+    "bucket": "code",
+    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "db_path": "db/docgraph.db",
+    "task": "phase1 infrastructure telemetry",
+    "expect_include": {"path": "agent-api\\api\\main.py", "provenance": "code_ref"},
+    "note": "PHASE1_INFRASTRUCTURE.md references agent-api/api/main.py by relative path (resolves directly, not via basename fallback)."
+  },
+  {
+    "bucket": "code",
+    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "db_path": "db/docgraph.db",
+    "task": "context map architecture data flow dependencies",
+    "expect_exclude": {"provenance": "code_ref"},
+    "note": "CLAUDE.md (the only seed for this task) has zero code_ref edges — negative control, mirrors document_parser's system_prompt.md finding: a doc with genuinely no code references should produce zero code_ref chunks, not a false positive from basename ambiguity."
   }
 ]
