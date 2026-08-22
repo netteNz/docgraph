@@ -22,7 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .context import retrieve
-from .visualize import BUCKET_COLORS, graph_data
+from .visualize import bucket_colors_for, graph_data
 
 SERVE_TEMPLATE = """<!DOCTYPE html>
 <html>
@@ -170,6 +170,12 @@ const svg = d3.select("#graph");
 const width = window.innerWidth, height = window.innerHeight;
 
 const defs = svg.append("defs");
+
+const pyGrad = defs.append("linearGradient").attr("id", "grad-code-py")
+  .attr("x1", "0%").attr("y1", "0%").attr("x2", "100%").attr("y2", "100%");
+pyGrad.append("stop").attr("offset", "0%").attr("stop-color", "#306998");
+pyGrad.append("stop").attr("offset", "100%").attr("stop-color", "#FFD43B");
+
 Object.entries(bucketColors).forEach(([bucket, color]) => {{
   const filter = defs.append("filter")
     .attr("id", `glow-${{bucket}}`)
@@ -213,16 +219,16 @@ const sim = d3.forceSimulation(data.nodes)
 
 const linkG = g.append("g").attr("class", "links");
 const link = linkG.selectAll("line").data(data.links).join("line")
-  .attr("stroke", "#21262d")
+  .attr("stroke", d => d.kind === "code_ref" ? "#bc8cff" : "#21262d")
   .attr("stroke-width", 1)
-  .attr("stroke-opacity", 0.7)
+  .attr("stroke-opacity", d => d.kind === "code_ref" ? 0.55 : 0.7)
   .attr("stroke-dasharray", d => d.kind === "structural" ? "3,3" : null);
 
 const nodeG = g.append("g").attr("class", "nodes");
 const node = nodeG.selectAll("circle").data(data.nodes).join("circle")
   .attr("class", "node-circle")
   .attr("r", 0)
-  .attr("fill", d => bucketColors[d.bucket] || "#8b949e")
+  .attr("fill", d => (bucketColors[d.bucket] || {{}}).fill || "#8b949e")
   .attr("stroke", "#0d1117")
   .attr("stroke-width", 1.5)
   .attr("fill-opacity", 0)
@@ -260,7 +266,10 @@ function resetHighlight() {{
     .attr("fill-opacity", 1).attr("filter", null)
     .attr("r", d => sizeScale(d.tokens || 1))
     .attr("stroke", "#0d1117").attr("stroke-width", 1.5);
-  link.transition().duration(200).attr("stroke", "#21262d").attr("stroke-width", 1).attr("stroke-opacity", 0.7);
+  link.transition().duration(200)
+    .attr("stroke", l => l.kind === "code_ref" ? "#bc8cff" : "#21262d")
+    .attr("stroke-width", 1)
+    .attr("stroke-opacity", l => l.kind === "code_ref" ? 0.55 : 0.7);
   provSectionEl.style.display = "none";
 }}
 
@@ -344,9 +353,9 @@ sim.on("tick.spawn", () => {{
 
 const legend = d3.select("#legend");
 legend.append("div").attr("class", "sectionTitle").text("file buckets");
-Object.entries(bucketColors).forEach(([bucket, color]) => {{
+Object.entries(bucketColors).forEach(([bucket, c]) => {{
   const row = legend.append("div");
-  row.append("span").attr("class", "dot").style("background", color).style("box-shadow", `0 0 6px ${{color}}55`);
+  row.append("span").attr("class", "dot").style("background", c.fill).style("box-shadow", `0 0 6px ${{c.glow}}55`);
   row.append("span").text(bucket).style("color", "#8b949e");
 }});
 if (data.links.some(l => l.kind === "structural")) {{
@@ -356,6 +365,14 @@ if (data.links.some(l => l.kind === "structural")) {{
     .style("border-top", "1.5px dashed #6e7681")
     .style("display", "inline-block");
   row.append("span").text("structural tie (no direct co-location)").style("color", "#8b949e");
+}}
+if (data.links.some(l => l.kind === "code_ref")) {{
+  const row = legend.append("div");
+  row.append("span")
+    .style("width", "14px").style("height", "0")
+    .style("border-top", "1.5px solid #bc8cff")
+    .style("display", "inline-block");
+  row.append("span").text("doc → code reference").style("color", "#8b949e");
 }}
 
 const provSection = legend.append("div").attr("id", "provSection");
@@ -501,7 +518,7 @@ def _page_html(db_path: Path, title: str) -> str:
         node_count=len(data["nodes"]),
         stats_label=stats_label,
         data_json=json.dumps(data),
-        colors_json=json.dumps(BUCKET_COLORS),
+        colors_json=json.dumps(bucket_colors_for(data["nodes"])),
     )
 
 

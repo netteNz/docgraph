@@ -2,6 +2,71 @@
 
 **Last updated**: 2026-08-22
 
+## 2026-08-22 — chunking-ui indexed + registered, code_ref semantics documented, code files added as extension-colored graph nodes
+
+Context: user asked to index a new repo (`~/projects/azure-development/chunking-ui`,
+a small RAG POC with Chainlit UI), then walked through how `code_ref` edges
+work, then asked for that to be reflected visually — code files should be
+real nodes on the graph, colored by extension, not invisible.
+
+**Indexed and registered `chunking-ui`**: `db/chunking-ui.db` — 7 files, 18
+co-location edges, 2 link edges, 4 `code_ref` edges, 3 code files indexed, 12
+`symbol` edges. Registered as MCP server `chunking-ui-docs`; first
+registration used a relative `.venv/bin/python` command (only resolves if
+the MCP server happens to be spawned from `~/Projects/docgraph`'s cwd) —
+removed and re-registered with the absolute interpreter path
+(`/Users/nettenz/Projects/docgraph/.venv/bin/python`) to avoid a
+launch-cwd-dependent failure. Spot-checked retrieval quality directly via
+`docgraph.context` before trusting it: a specific query ("how does semantic
+re-ranking work") correctly top-ranked `implementation_plan.md`; an
+unrelated query ("kubernetes deployment yaml") correctly returned 0 chunks
+(no false positives); an AND-matched query ("metadata filtering") correctly
+preferred the doc that actually proposes that feature over a more tangential
+concepts doc.
+
+**Code files are now real graph nodes, colored by extension** — previously
+`bucket='code'` doc rows were filtered out of `graph_data()` entirely (see
+the 2026-08-22 entry above this one: that filter was a *fix* for a different
+bug, fabricated structural edges onto code files that had no edges of their
+own — but the side effect was code files never appearing as nodes at all,
+even once they *did* have real `code_ref` edges from V3/V4). Changed
+`visualize.py`'s `graph_data()` to include all `docs` rows again, derive a
+synthetic per-extension bucket key (`code-py`, `code-js`, `code-tsx`, ...)
+for `bucket='code'` rows, and pull in `kind='code_ref'` edges (stripping the
+optional `#Heading` suffix V4 symbol-resolution can add, and de-duping the
+result — two symbol-level refs into the same file previously would've
+produced parallel duplicate edges) merged in *before* `add_structural_ties`
+so code files with a real edge aren't mistaken for orphans.
+
+New `bucket_colors_for(nodes)` builds the color map per-index (not a static
+module constant) so only extensions actually present get a legend entry.
+`.py` renders as a real SVG gradient (`#306998` → `#FFD43B`, Python's own
+brand colors) rather than a single blended hex, which would've just read as
+muddy; `.js`/`.ts`/`.jsx`/`.tsx`/`.go`/`.rs` get flat colors from each
+ecosystem's common convention. `code_ref` edges render solid purple
+(`#bc8cff`, matching the provenance-badge color `serve.py` already used for
+`code_ref` chunks in the query-result panel, so the same edge kind reads the
+same color everywhere in the tool). Both `visualize.py` and `serve.py` share
+this logic through `bucket_colors_for`/`graph_data`, so the live server
+picked it up with no separate implementation.
+
+**Bug caught and fixed during implementation, not after**: both renderers'
+link mouseout handlers hard-reset every edge's stroke to flat grey — that
+would've silently wiped the new purple `code_ref` styling back to grey the
+instant you moved the mouse off a node. Fixed to be `kind`-aware (`code_ref`
+→ purple, else grey), the same pattern the existing dashed-vs-solid
+`structural` styling already used.
+
+Verified: `graph_data()` on `chunking-ui.db` returns exactly 3 `code-py`
+nodes (`app.py`, `backend.py`, `Original_Work/rag_poc.py`) and 4 de-duped
+`code_ref` edges (the `rag_poc.py#SimpleEnsembleRetriever` symbol-level ref
+correctly collapsed to the file-level edge, not duplicated). Rendered and
+visually confirmed. `tests/run_code_fixtures.py` (10/10) and
+`run_link_fixtures.py` (all runnable fixtures) still pass — neither touches
+`visualize.py`/`serve.py`, so this was a manual/visual verification, not a
+fixture-covered one; no automated regression coverage exists yet for the
+graph-rendering layer.
+
 ## 2026-08-22 — Path portability fix, code-node graph regression fixed, MCP re-registered on macOS, V2–V4 validation gate instrumented
 
 Context: this session picked up from a context-map audit that found the
@@ -271,10 +336,12 @@ Modules (`src/docgraph/`):
   `build_pack()` is a thin wrapper — `_render(retrieve(...))` — kept for CLI/MCP
   backward compat, returns the same markdown string as before the refactor.
 - `mcp_server.py` — MCP server wrapping `build_pack()` as a tool (`docgraph_context`)
-- `visualize.py` — static, self-contained D3 HTML graph (file nodes, co-location
-  edges, colored by bucket, sized by token count). `graph_data(db_path)` (node/edge
-  query + `add_structural_ties`) is factored out and reused by `serve.py` so the two
-  rendering paths can't drift on corpus-shape logic.
+- `visualize.py` — static, self-contained D3 HTML graph (file nodes, co-location +
+  `code_ref` edges, sized by token count). Nodes colored by discovery bucket, except
+  `bucket='code'` files which are colored by extension (`code-py` gets a Python-brand
+  blue→yellow gradient, others a flat per-ecosystem color) via `bucket_colors_for()`.
+  `graph_data(db_path)` (node/edge query + `add_structural_ties`) is factored out and
+  reused by `serve.py` so the two rendering paths can't drift on corpus-shape logic.
 - `serve.py` (new) — stdlib `http.server` (no new dependency) serving the same
   graph live, plus a task box wired to `context.retrieve()`. Typing a task hits
   `GET /context?task=...&max_tokens=...`, highlights the selected file nodes
@@ -306,6 +373,7 @@ Then either `source .venv/bin/activate` first, or call `.venv/bin/python -m docg
 |---|---|---|---|
 | `db/doordashboard.db` | `~/projects/doordashboard` | macOS | not registered |
 | `db/docgraph.db` | `~/Projects/agentic-dev/reinforcement-learning-stocks` | macOS | `rl-stocks-docs` (registered 2026-08-22, includes `-e DOCGRAPH_QUERY_LOG=...`) |
+| `db/chunking-ui.db` | `~/projects/azure-development/chunking-ui` | macOS | `chunking-ui-docs` (registered 2026-08-22, absolute `.venv/bin/python` path) |
 | `db/docgraph-trading.db` | `D:\code\web-development\trading-dashboard` | Windows | `docgraph-trading-dashboard` |
 | `db/docgraph.db` (Windows copy) | `D:\code\agentic-development\reinforcement-learning-stocks` | Windows | `docgraph-rl-stocks` |
 | `db/coinbase_rl_bot.db` | `D:\code\agentic-development\coinbase-rl-bot` | Windows | not registered |
@@ -354,9 +422,12 @@ python -m docgraph.visualize db/docgraph-trading.db graphs/trading_graph.html --
 ```
 Open the `.html` output directly in a browser. Nodes = files (not chunks),
 colored by discovery bucket (gray=root, blue=docs, purple=skills,
-green=subdir-allcaps), sized by token count, edges = co-location
-relationships. Deliberately a structural/corpus-shape view, not a retrieval
-view — doesn't show chunk-level (H2/H3) structure or FTS relevance.
+green=subdir-allcaps) — except code files (`bucket='code'`, referenced via a
+`code_ref` edge from a doc), which are colored by extension instead (Python
+gets a blue→yellow gradient, others a flat per-ecosystem color), sized by
+token count. Edges = co-location relationships (grey) plus doc→code
+`code_ref` edges (purple). Deliberately a structural/corpus-shape view, not a
+retrieval view — doesn't show chunk-level (H2/H3) structure or FTS relevance.
 
 Live (task-driven retrieval highlighting):
 ```bash

@@ -18,11 +18,46 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 BUCKET_COLORS = {
-    "root": "#8b949e",
-    "docs": "#58a6ff",
-    "skills": "#bc8cff",
-    "subdir-allcaps": "#3fb950",
+    "root": {"fill": "#8b949e", "glow": "#8b949e"},
+    "docs": {"fill": "#58a6ff", "glow": "#58a6ff"},
+    "skills": {"fill": "#bc8cff", "glow": "#bc8cff"},
+    "subdir-allcaps": {"fill": "#3fb950", "glow": "#3fb950"},
 }
+
+# Per-file-extension colors for bucket='code' nodes (V4: code files as real
+# graph nodes, not just retrieval-time chunks). Keyed by the code_refs.py
+# CODE_EXTENSIONS set. .py gets a two-tone gradient (Python's actual brand
+# colors) since a blended single hex reads as muddy; everything else is a
+# single fill/glow color pulled from each ecosystem's common convention.
+CODE_EXT_COLORS = {
+    "py": {"fill": "url(#grad-code-py)", "glow": "#4B8BBE"},
+    "js": {"fill": "#f1e05a", "glow": "#f1e05a"},
+    "ts": {"fill": "#3178c6", "glow": "#3178c6"},
+    "jsx": {"fill": "#61dafb", "glow": "#61dafb"},
+    "tsx": {"fill": "#61dafb", "glow": "#61dafb"},
+    "go": {"fill": "#00ADD8", "glow": "#00ADD8"},
+    "rs": {"fill": "#dea584", "glow": "#dea584"},
+}
+DEFAULT_CODE_COLOR = {"fill": "#8b949e", "glow": "#8b949e"}
+
+
+def _code_bucket(path: str) -> str:
+    """Synthetic per-extension bucket key for a bucket='code' doc row."""
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return f"code-{ext}" if ext else "code-other"
+
+
+def bucket_colors_for(nodes: list[dict]) -> dict:
+    """BUCKET_COLORS plus one CODE_EXT_COLORS entry per code-* bucket that's
+    actually present in these nodes, so the legend/palette only ever lists
+    extensions this repo's index actually has."""
+    colors = dict(BUCKET_COLORS)
+    for n in nodes:
+        b = n["bucket"]
+        if b.startswith("code-") and b not in colors:
+            ext = b[len("code-"):]
+            colors[b] = CODE_EXT_COLORS.get(ext, DEFAULT_CODE_COLOR)
+    return colors
 
 # Filename stems (no extension) that make a good "hub" for a directory of
 # otherwise-unlinked docs, in priority order.
@@ -206,6 +241,11 @@ const width = window.innerWidth, height = window.innerHeight;
 // ── defs: per-bucket glow filters + link glow ───────────────────────────────
 const defs = svg.append("defs");
 
+const pyGrad = defs.append("linearGradient").attr("id", "grad-code-py")
+  .attr("x1", "0%").attr("y1", "0%").attr("x2", "100%").attr("y2", "100%");
+pyGrad.append("stop").attr("offset", "0%").attr("stop-color", "#306998");
+pyGrad.append("stop").attr("offset", "100%").attr("stop-color", "#FFD43B");
+
 Object.entries(bucketColors).forEach(([bucket, color]) => {{
   const filter = defs.append("filter")
     .attr("id", `glow-${{bucket}}`)
@@ -237,9 +277,9 @@ const sim = d3.forceSimulation(data.nodes)
 // ── Links ────────────────────────────────────────────────────────────────────
 const linkG = g.append("g").attr("class", "links");
 const link = linkG.selectAll("line").data(data.links).join("line")
-  .attr("stroke", "#21262d")
+  .attr("stroke", d => d.kind === "code_ref" ? "#bc8cff" : "#21262d")
   .attr("stroke-width", 1)
-  .attr("stroke-opacity", 0.7)
+  .attr("stroke-opacity", d => d.kind === "code_ref" ? 0.55 : 0.7)
   .attr("stroke-dasharray", d => d.kind === "structural" ? "3,3" : null);
 
 // ── Nodes ────────────────────────────────────────────────────────────────────
@@ -247,7 +287,7 @@ const nodeG = g.append("g").attr("class", "nodes");
 const node = nodeG.selectAll("circle").data(data.nodes).join("circle")
   .attr("class", "node-circle")
   .attr("r", 0)
-  .attr("fill", d => bucketColors[d.bucket] || "#8b949e")
+  .attr("fill", d => (bucketColors[d.bucket] || {{}}).fill || "#8b949e")
   .attr("stroke", "#0d1117")
   .attr("stroke-width", 1.5)
   .attr("fill-opacity", 0)
@@ -287,7 +327,8 @@ node
       .attr("stroke", l => {{
         const sid = typeof l.source === "object" ? l.source.id : l.source;
         const tid = typeof l.target === "object" ? l.target.id : l.target;
-        return (sid === d.id || tid === d.id) ? (bucketColors[d.bucket] || "#8b949e") : "#21262d";
+        if (sid === d.id || tid === d.id) return (bucketColors[d.bucket] || {{}}).fill || "#8b949e";
+        return l.kind === "code_ref" ? "#bc8cff" : "#21262d";
       }})
       .attr("stroke-width", l => {{
         const sid = typeof l.source === "object" ? l.source.id : l.source;
@@ -319,8 +360,10 @@ node
 
     node.transition().duration(200).attr("fill-opacity", 1);
     link.transition().duration(200)
-      .attr("stroke", "#21262d").attr("stroke-width", 1)
-      .attr("stroke-opacity", 0.7).attr("filter", null);
+      .attr("stroke", l => l.kind === "code_ref" ? "#bc8cff" : "#21262d")
+      .attr("stroke-width", 1)
+      .attr("stroke-opacity", l => l.kind === "code_ref" ? 0.55 : 0.7)
+      .attr("filter", null);
 
     tooltip.style("display", "none");
   }});
@@ -348,9 +391,9 @@ sim.on("tick.spawn", () => {{
 
 // ── Legend ────────────────────────────────────────────────────────────────────
 const legend = d3.select("#legend");
-Object.entries(bucketColors).forEach(([bucket, color]) => {{
+Object.entries(bucketColors).forEach(([bucket, c]) => {{
   const row = legend.append("div");
-  row.append("span").attr("class", "dot").style("background", color).style("box-shadow", `0 0 6px ${{color}}55`);
+  row.append("span").attr("class", "dot").style("background", c.fill).style("box-shadow", `0 0 6px ${{c.glow}}55`);
   row.append("span").text(bucket).style("color", "#8b949e");
 }});
 
@@ -361,6 +404,15 @@ if (data.links.some(l => l.kind === "structural")) {{
     .style("border-top", "1.5px dashed #6e7681")
     .style("display", "inline-block");
   row.append("span").text("structural tie (no direct co-location)").style("color", "#8b949e");
+}}
+
+if (data.links.some(l => l.kind === "code_ref")) {{
+  const row = legend.append("div");
+  row.append("span")
+    .style("width", "14px").style("height", "0")
+    .style("border-top", "1.5px solid #bc8cff")
+    .style("display", "inline-block");
+  row.append("span").text("doc → code reference").style("color", "#8b949e");
 }}
 </script>
 </body>
@@ -375,22 +427,37 @@ def graph_data(db_path: Path) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    # bucket='code' rows are reference-driven code-file insertions (V3), not
-    # part of the markdown corpus-shape view -- they have no colocation edges
-    # of their own, so including them here only produces fabricated
-    # add_structural_ties hub-and-spoke edges. Filtered out at the source.
-    docs = conn.execute("SELECT path, bucket, indexed_title, token_est FROM docs WHERE bucket != 'code'").fetchall()
+    docs = conn.execute("SELECT path, bucket, indexed_title, token_est FROM docs").fetchall()
     edges = conn.execute(
         "SELECT DISTINCT source, target FROM edges WHERE kind = 'colocation' AND source < target"
     ).fetchall()  # source < target dedupes the bidirectional pair back to one line per edge
+    code_ref_edges = conn.execute(
+        "SELECT source, target FROM edges WHERE kind = 'code_ref'"
+    ).fetchall()
     conn.close()
 
     nodes = [
         {"id": d["path"], "path": d["path"], "title": d["indexed_title"] or d["path"],
-         "bucket": d["bucket"], "tokens": d["token_est"]}
+         "bucket": _code_bucket(d["path"]) if d["bucket"] == "code" else d["bucket"],
+         "tokens": d["token_est"]}
         for d in docs
     ]
     links = [{"source": e["source"], "target": e["target"], "kind": "colocation"} for e in edges]
+
+    # code_ref targets may carry a chunk heading (path#Heading) for
+    # symbol-level refs -- strip it to land on the file-level node id, and
+    # de-dupe since two symbol refs into the same file would otherwise
+    # produce parallel duplicate edges.
+    seen_code_links = set()
+    for e in code_ref_edges:
+        target = e["target"].split("#", 1)[0]
+        key = (e["source"], target)
+        if key not in seen_code_links:
+            seen_code_links.add(key)
+            links.append({"source": e["source"], "target": target, "kind": "code_ref"})
+
+    # code_ref links merged in first so code files with a real edge aren't
+    # mistaken for orphans and given a fabricated structural tie.
     links = add_structural_ties(nodes, links)
     return {"nodes": nodes, "links": links}
 
@@ -409,7 +476,7 @@ def build_html(db_path: Path, title: str = "") -> str:
         node_count=len(nodes),
         stats_label=stats_label,
         data_json=json.dumps(data),
-        colors_json=json.dumps(BUCKET_COLORS),
+        colors_json=json.dumps(bucket_colors_for(nodes)),
     )
 
 
