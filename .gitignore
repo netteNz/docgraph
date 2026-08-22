@@ -12,6 +12,10 @@ dist/
 *.db-journal
 docgraph_out.txt
 
+# Query log (opt-in via DOCGRAPH_QUERY_LOG) -- task strings can carry
+# sensitive repo detail, never commit this
+*.jsonl
+
 # Generated graph visualizations
 *_graph.html
 

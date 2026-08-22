@@ -6,7 +6,7 @@ Moved verbatim from scripts/link_audit.py's Phase 0 prototype once the audit
 confirmed real (if thin, hub-concentrated) disjoint-link signal across the
 rl-stocks and coinbase-rl-bot corpora.
 """
-import os
+import posixpath
 import re
 
 _LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\(([^)\s]+)\)")
@@ -49,16 +49,15 @@ def extract_links(body: str) -> list[tuple[str, str | None]]:
 def resolve_link(source_path: str, raw_target: str, known_paths: set[str]) -> str | None:
     """Resolve a markdown link target to a docs.path, or None if unresolvable.
 
-    docs.path is stored as str(path.relative_to(repo_root)) (index.py), which
-    uses OS-native separators (backslash on Windows) — normalize with
-    os.path, not a hardcoded "/", so the known_paths membership check
-    actually matches on every platform.
+    docs.path is stored as path.relative_to(repo_root).as_posix() (index.py)
+    -- canonically forward-slash on every platform -- so resolution uses
+    posixpath, not os.path, to match regardless of what OS this runs on.
     """
     if raw_target.startswith("/"):
         base = ""
         target = raw_target.lstrip("/")
     else:
-        base = os.path.dirname(source_path)
+        base = posixpath.dirname(source_path)
         target = raw_target
-    normalized = os.path.normpath(os.path.join(base, target)) if base else os.path.normpath(target)
+    normalized = posixpath.normpath(posixpath.join(base, target)) if base else posixpath.normpath(target)
     return normalized if normalized in known_paths else None

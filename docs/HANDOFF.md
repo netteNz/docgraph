@@ -1,6 +1,103 @@
 # DocGraph — Session Handoff
 
-**Last updated**: 2026-08-21
+**Last updated**: 2026-08-22
+
+## 2026-08-22 — Path portability fix, code-node graph regression fixed, MCP re-registered on macOS, V2–V4 validation gate instrumented
+
+Context: this session picked up from a context-map audit that found the
+macOS checkout had none of the Windows-produced `*.db` files (`*.db` is
+gitignored) and that `run_link_fixtures.py` couldn't pass here because
+`link_fixtures.json` hardcoded Windows paths. Digging into *why* that
+fixture was Windows-only surfaced the real bug underneath it.
+
+**Root cause found**: `docs.path` (and everything derived from it —
+`edges.source`/`target`, `_discover_code_files`'s known-code-paths set) was
+stored via `str(path.relative_to(repo_root))`, which renders with the
+OS-native separator — the same repo indexed on Windows vs. macOS produced a
+genuinely different database (backslash- vs forward-slash-joined paths), not
+just a differently-formatted one. `links.py::resolve_link`'s docstring had
+already half-diagnosed this and patched around it locally with
+`os.path.normpath` — which doesn't actually fix it, since `os.path` is
+itself OS-native. **Fixed** at the four sites in `index.py` that turn a
+`Path` into a stored string (`.as_posix()` / `PurePosixPath(...).as_posix()`
+instead of `str(...)`), and switched `resolve_link`/`resolve_code_ref` from
+`os.path` to `posixpath` now that their inputs are guaranteed forward-slash.
+Empirically checked before assuming impact: `ntpath.normpath`/`.basename`
+already treat `/` as a valid separator, so the Windows-run `code_ref`
+matching specifically was never actually broken by this — the fix is a
+genuine cross-platform-storage correctness fix, not a matching-accuracy fix.
+`run_code_fixtures.py` (platform-clean, 10/10) re-verified after the change.
+
+**`tests/fixtures/link_fixtures.json` ported to be genuinely portable**:
+forward-slash expected paths, `repo_root` replaced with a short `repo` name
+resolved against a `DOCGRAPH_FIXTURE_REPOS_DIR` env var at runtime (one file,
+valid on any machine with the referenced repos checked out, no per-OS fork).
+`run_link_fixtures.py` now skips — doesn't fail — a fixture whose repo/db
+isn't present on the running machine. On this checkout: 5/7 fixtures pass
+(1 organic, 1 hub, 3 code); 2 skip cleanly (`coinbase-rl-bot`'s repo and db
+aren't present here). One fixture (the `code_ref` negative control) needed
+tightening from "zero `code_ref` chunks in the pack" to "zero `code_ref`
+chunks with `via=CLAUDE.md`" — real corpus drift added a `README.md` that
+now co-seeds the same task and has its own unrelated, real `code_ref`
+edges; `CLAUDE.md` itself still correctly has none. This is drift, not a
+regression from the path fix.
+
+**Rebuilt `db/docgraph.db` against rl-stocks on macOS**: 65 files (down from
+72), 80 co-location edges, 2 link edges, 84 `code_ref` edges (down from 94),
+542 `symbol` edges (unchanged — exact match). The file-count and code_ref-
+count drops are corpus drift (rl-stocks has moved on since the Windows
+session), confirmed via direct inspection, not investigated further since
+that's outside this session's scope.
+
+**Code-node graph regression, found and fixed**: `docs/V4_NEXT_STEPS.md`
+item 1 asked whether `graph_data()` might double-count or mishandle
+`symbol` self-loops post-V4 — neither was actually possible
+(`graph_data` queries `docs` not `chunks`, and hard-filters
+`kind='colocation'`). The real defect predates V4 — landed in V3, when
+referenced code files started entering `docs` with `bucket='code'` with no
+corresponding entry in `BUCKET_COLORS`, no colocation edges of their own,
+and therefore only ever a fabricated `add_structural_ties` hub-and-spoke
+edge. Fixed with a `WHERE bucket != 'code'` filter in `graph_data`'s query
+(`visualize.py`); `serve.py` inherits it since it imports `graph_data`
+directly. Verified: `graph_data()` on the rebuilt index returns 65 nodes
+(exactly the markdown-doc count), zero `bucket='code'` nodes.
+
+**MCP re-registered on macOS** as `rl-stocks-docs`, including
+`-e DOCGRAPH_QUERY_LOG=...` at registration time (see gotcha #6 above for
+why that has to be `-e`, not a shell export). Hit an unrelated environment
+issue along the way: `mcp` had drifted to 2.0.0 (unpinned dependency),
+which dropped `mcp.server.fastmcp` — pinned `mcp<2.0` (see gotcha #5).
+Verified through the *registered* tool (not the CLI) via a real `claude -p`
+call: `docgraph_context` returned real def/class-level sliced chunks (e.g. a
+26-token `_active_news_cols` chunk selected over the 1235-token whole
+`scripts/backtest_exit_rules.py`) — the one check `V4_NEXT_STEPS.md` had
+flagged as never performed.
+
+**V2–V4 validation gate, instrumented but not yet run**: every one of V2,
+V3, V4 shipped with "NOT yet validated in real use," and V2's original kill
+gate was never actually run before V3/V4 built on top of it. Before writing
+any logging code, pre-registered a kill criterion in `docs/V4_NEXT_STEPS.md`
+(≥20 real calls, <15% annotated-as-actually-used → kill) — the point being
+that a threshold exists *before* the data does, not after. Then built
+`context.retrieve()`'s opt-in JSONL query logger (`DOCGRAPH_QUERY_LOG`,
+off by default, wrapped so a write failure can never break retrieval,
+written outside any indexed repo per gotcha #3): each entry captures
+selected chunks *and* the budget-cut counterfactual (candidates that scored
+into ranking but lost to the token budget, same provenance/via/rank
+fields) — the counterfactual is what makes "what did V2–V4 add vs. what did
+it cost" computable from the log alone, not just "was a fancy-provenance
+chunk present." `*.jsonl` added to `.gitignore` in the same commit as the
+logging code. Verified: env var unset → retrieval succeeds, no log; env var
+set → log populated with real provenance spanning seed/neighbor/code_ref and
+a real budget_cut list; env var pointed at an unwritable path → retrieval
+still succeeds. **Not yet run for real** — that's the actual next step, see
+`docs/V4_NEXT_STEPS.md`.
+
+**Housekeeping**: `HANDOFF.md` cited `CLAUDE.md`'s "Link edges" section as
+V2's rationale, but `CLAUDE.md` is gitignored and was never actually
+committed — `.gitignore` explicitly marks it as intentionally local-only, so
+fixed the pointer to README's Design notes (which already has the full
+writeup) instead of un-ignoring the file.
 
 ## 2026-08-21 — V4 def/class-boundary code slicing + symbol-trace expansion: added, evaluated against rl-stocks
 
@@ -127,8 +224,9 @@ Added `kind='link'` edges (directional, doc-level, `MAX_LINK_FANOUT=10`
 skip-not-truncate on hub docs) and unconditional one-hop link-neighbor
 expansion in `retrieve()` (`MAX_LINK_NEIGHBORS_PER_SEED=5`, ranked below
 every seed/co-location neighbor, `provenance="link"` + `via` field). Full
-rationale in CLAUDE.md's "Link edges" section (local-only file, not in git
-— see `.gitignore`) and README's Design notes.
+rationale in README's Design notes ("Link edges (V2)") — that's the source
+of truth for this; `CLAUDE.md` is a local-only file (see `.gitignore`) and
+was never actually committed, so don't cite it as a reference here.
 
 **Phase 0 audit results** (`scripts/link_audit.py`, run against the three
 corpora indexed below):
@@ -207,12 +305,18 @@ Then either `source .venv/bin/activate` first, or call `.venv/bin/python -m docg
 | DB file | Source repo | Environment | Registered MCP server name |
 |---|---|---|---|
 | `db/doordashboard.db` | `~/projects/doordashboard` | macOS | not registered |
+| `db/docgraph.db` | `~/Projects/agentic-dev/reinforcement-learning-stocks` | macOS | `rl-stocks-docs` (registered 2026-08-22, includes `-e DOCGRAPH_QUERY_LOG=...`) |
 | `db/docgraph-trading.db` | `D:\code\web-development\trading-dashboard` | Windows | `docgraph-trading-dashboard` |
-| `db/docgraph.db` | `D:\code\agentic-development\reinforcement-learning-stocks` | Windows | `docgraph-rl-stocks` |
+| `db/docgraph.db` (Windows copy) | `D:\code\agentic-development\reinforcement-learning-stocks` | Windows | `docgraph-rl-stocks` |
 | `db/coinbase_rl_bot.db` | `D:\code\agentic-development\coinbase-rl-bot` | Windows | not registered |
 | `db/document_parser.db` | `D:\code\microsoft\document_parser` | Windows | not registered |
 
-Windows entries registered via `claude mcp add ... -s user -e PYTHONIOENCODING=utf-8 -- python -m docgraph.mcp_server <repo_root> <db_path>`. Check with `claude mcp list`.
+`db/docgraph.db` is per-machine, not shared (gitignored) — the macOS and
+Windows rows above both build from the rl-stocks repo but are separate
+files that can drift out of sync (see 2026-08-22 entry: 65 files here vs.
+72 on the Windows run).
+
+Windows entries registered via `claude mcp add ... -s user -e PYTHONIOENCODING=utf-8 -- python -m docgraph.mcp_server <repo_root> <db_path>`. See README's registration recipe for the macOS command, including the `DOCGRAPH_QUERY_LOG` `-e` flag needed for the query logger. Check with `claude mcp list`.
 
 ## Rebuilding an index
 
@@ -294,6 +398,19 @@ prior versions of this handoff called out as not-yet-built.
    copy. Confirmed fixed via both `docgraph.context` (single copy of
    `indicator-combo-builder` content) and `docgraph.visualize` (single
    `skills` cluster in the graph, not two).
+5. **`ModuleNotFoundError: No module named 'mcp.server.fastmcp'`** when
+   running `mcp_server.py` — `pyproject.toml` declared a bare `mcp`
+   dependency, and `mcp` 2.0.0 dropped the `fastmcp` submodule `mcp_server.py`
+   uses. Fix: pinned `mcp<2.0` in `pyproject.toml`; `.venv/bin/pip install
+   -e .` then resolves to 1.29.0, which still has it. Environment-agnostic —
+   will hit on any fresh venv until this is either re-pinned or `mcp_server.py`
+   is ported to whatever the 2.0 API's equivalent is.
+6. **`DOCGRAPH_QUERY_LOG` set in your shell does nothing for the MCP
+   server.** The server is a process Claude Code spawns, not a child of your
+   terminal — the env var has to be passed via `-e` at `claude mcp add`
+   registration time (see README's registration recipe). Re-registering
+   without it produces an empty log file, not an error; verify a few real
+   calls actually produce log lines before trusting a week of silence.
 
 ## State as of last run — Windows session (trading-dashboard index)
 

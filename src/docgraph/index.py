@@ -22,7 +22,7 @@ Schema decisions each trace to a specific finding from the audit phase
 import hashlib
 import re
 import sqlite3
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import frontmatter  # python-frontmatter
 
@@ -88,10 +88,10 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
         raw = path.read_text(encoding="utf-8", errors="replace")
         post = frontmatter.loads(raw)
         body = post.content
-        rel = str(path.relative_to(repo_root))
+        rel = path.relative_to(repo_root).as_posix()
         rows.append({
             "path": rel,
-            "parent": str(Path(rel).parent),
+            "parent": PurePosixPath(rel).parent.as_posix(),
             "bucket": bucket,
             "title": _resolve_title(post, body, path),
             "body": body,
@@ -251,7 +251,7 @@ def _discover_code_files(repo_root: Path) -> set[str]:
             rel = p.relative_to(repo_root)
             if any(part in DEFAULT_EXCLUDES for part in rel.parts):
                 continue
-            found.add(str(rel))
+            found.add(rel.as_posix())
     return found
 
 
@@ -369,7 +369,7 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
         cur = conn.execute(
             "INSERT INTO docs(path,parent,bucket,title,indexed_title,hash,bytes,token_est) "
             "VALUES(?,?,?,?,?,?,?,?)",
-            (code_path, str(Path(code_path).parent), "code", filename, filename,
+            (code_path, PurePosixPath(code_path).parent.as_posix(), "code", filename, filename,
              hashlib.sha256(body.encode()).hexdigest()[:12], len(body), _token_est(body)),
         )
         doc_id = cur.lastrowid

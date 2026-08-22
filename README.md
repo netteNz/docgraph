@@ -88,6 +88,27 @@ claude mcp add my-repo-docs -s user -e PYTHONIOENCODING=utf-8 -- \
 One server instance = one repo + one index. For multiple repos, register
 multiple servers with distinct names and separate `.db` files.
 
+**Query logging.** `context.retrieve()` supports an opt-in, append-only
+JSONL query log via the `DOCGRAPH_QUERY_LOG` env var (unset by default —
+see `docs/V4_NEXT_STEPS.md`'s validation-gate entry for why it exists). The
+MCP server is a process Claude Code spawns, not a child of your interactive
+shell, so exporting `DOCGRAPH_QUERY_LOG` in a terminal has no effect on it —
+it must be passed via `-e` at registration time:
+
+```bash
+claude mcp add my-repo-docs -s user \
+  -e PYTHONIOENCODING=utf-8 \
+  -e DOCGRAPH_QUERY_LOG=/absolute/path/outside/any/indexed/repo/query_log.jsonl \
+  -- python -m docgraph.mcp_server /path/to/repo /full/path/to/db/my-repo.db
+```
+
+Re-registering without `-e DOCGRAPH_QUERY_LOG=...` silently produces an
+empty log, not an error — after registering, run a couple of real tasks
+through the tool and confirm the file actually has entries before trusting
+a longer stretch of silence. Keep the path outside any repo `docgraph`
+indexes (a log inside an indexed repo will contain the next query's task
+string verbatim and self-match on the next reindex).
+
 ## Live web graph (`serve.py`)
 
 ```bash

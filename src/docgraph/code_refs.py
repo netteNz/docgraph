@@ -7,7 +7,7 @@ symbol-chunk resolution (no fuzzy/prose matching) — see docs/HANDOFF.md's
 V3 entry for the original filename-only scope, and its V4 entry for the
 symbol-mention extension added here.
 """
-import os
+import posixpath
 import re
 
 CODE_EXTENSIONS = {"py", "js", "ts", "jsx", "tsx", "go", "rs"}
@@ -62,13 +62,13 @@ def resolve_code_ref(source_path: str, raw_target: str, known_code_paths: set[st
     matches — tracked separately since ambiguous refs could be made real by
     disambiguating, dead ones can't (no edges beats wrong edges either way).
     """
-    base = os.path.dirname(source_path)
-    normalized = os.path.normpath(os.path.join(base, raw_target)) if base else os.path.normpath(raw_target)
+    base = posixpath.dirname(source_path)
+    normalized = posixpath.normpath(posixpath.join(base, raw_target)) if base else posixpath.normpath(raw_target)
     if normalized in known_code_paths:
         return normalized, "resolved"
 
-    target_name = os.path.basename(raw_target)
-    matches = [p for p in known_code_paths if os.path.basename(p) == target_name]
+    target_name = posixpath.basename(raw_target)
+    matches = [p for p in known_code_paths if posixpath.basename(p) == target_name]
     if len(matches) == 1:
         return matches[0], "resolved"
     if len(matches) > 1:

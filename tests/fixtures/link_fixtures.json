@@ -1,58 +1,78 @@
 [
   {
     "bucket": "organic",
-    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "repo": "reinforcement-learning-stocks",
     "db_path": "db/docgraph.db",
     "task": "Implementation Plan: Environment Realism Fixes",
-    "expect_include": {"path": "docs\\SENTIMENT_INTEGRATION.md", "provenance": "link"},
-    "note": "IMPLEMENTATION_PLAN_ENVIRONMENT_REALISM.md links to SENTIMENT_INTEGRATION.md (jaccard=0.10, not reachable by the source doc's own title vocabulary) — the cleanest organic case from Phase 0's audit, no hub confound."
+    "expect_include": {
+      "path": "docs/SENTIMENT_INTEGRATION.md",
+      "provenance": "link"
+    },
+    "note": "IMPLEMENTATION_PLAN_ENVIRONMENT_REALISM.md links to SENTIMENT_INTEGRATION.md (jaccard=0.10, not reachable by the source doc's own title vocabulary) \u2014 the cleanest organic case from Phase 0's audit, no hub confound."
   },
   {
     "bucket": "organic",
-    "repo_root": "/d/code/agentic-development/coinbase-rl-bot",
+    "repo": "coinbase-rl-bot",
     "db_path": "db/coinbase_rl_bot.db",
     "task": "coinbase-rl-bot",
-    "expect_include": {"path": "docs\\NEXT_EXPERIMENTS.md", "provenance": "link"},
+    "expect_include": {
+      "path": "docs/NEXT_EXPERIMENTS.md",
+      "provenance": "link"
+    },
     "note": "README.md links to docs/NEXT_EXPERIMENTS.md (jaccard=0.19)."
   },
   {
     "bucket": "organic",
-    "repo_root": "/d/code/agentic-development/coinbase-rl-bot",
+    "repo": "coinbase-rl-bot",
     "db_path": "db/coinbase_rl_bot.db",
     "task": "NEXT_EXPERIMENTS btc post-v3 program",
-    "expect_include": {"path": "HANDOFF.md", "provenance": "link"},
+    "expect_include": {
+      "path": "HANDOFF.md",
+      "provenance": "link"
+    },
     "note": "docs/NEXT_EXPERIMENTS.md links to HANDOFF.md (jaccard=0.33)."
   },
   {
     "bucket": "hub",
-    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "repo": "reinforcement-learning-stocks",
     "db_path": "db/docgraph.db",
     "task": "Documentation Index",
-    "expect_exclude": {"via": "docs\\INDEX.md"},
-    "note": "docs/INDEX.md resolves 12 distinct link targets, over MAX_LINK_FANOUT=10 — index.py must skip ALL of its link edges rather than partially truncate. This fixture asserts no returned chunk has provenance=link with via=docs\\INDEX.md, i.e. the hub genuinely contributes zero link edges, not just a capped subset."
+    "expect_exclude": {
+      "via": "docs/INDEX.md"
+    },
+    "note": "docs/INDEX.md resolves 12 distinct link targets, over MAX_LINK_FANOUT=10 \u2014 index.py must skip ALL of its link edges rather than partially truncate. This fixture asserts no returned chunk has provenance=link with via=docs/INDEX.md, i.e. the hub genuinely contributes zero link edges, not just a capped subset."
   },
   {
     "bucket": "code",
-    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "repo": "reinforcement-learning-stocks",
     "db_path": "db/docgraph.db",
     "task": "exit signal todo plan",
-    "expect_include": {"path": "scripts\\analyze_reward_divergence.py", "provenance": "code_ref"},
-    "note": "EXIT_SIGNAL_TODO.md mentions scripts/analyze_reward_divergence.py in a fenced CLI-invocation block (no markdown-link syntax) — V3's filename-mention extraction, not V2's link extraction."
+    "expect_include": {
+      "path": "scripts/analyze_reward_divergence.py",
+      "provenance": "code_ref"
+    },
+    "note": "EXIT_SIGNAL_TODO.md mentions scripts/analyze_reward_divergence.py in a fenced CLI-invocation block (no markdown-link syntax) \u2014 V3's filename-mention extraction, not V2's link extraction."
   },
   {
     "bucket": "code",
-    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "repo": "reinforcement-learning-stocks",
     "db_path": "db/docgraph.db",
     "task": "phase1 infrastructure telemetry",
-    "expect_include": {"path": "agent-api\\api\\main.py", "provenance": "code_ref"},
+    "expect_include": {
+      "path": "agent-api/api/main.py",
+      "provenance": "code_ref"
+    },
     "note": "PHASE1_INFRASTRUCTURE.md references agent-api/api/main.py by relative path (resolves directly, not via basename fallback)."
   },
   {
     "bucket": "code",
-    "repo_root": "/d/code/agentic-development/reinforcement-learning-stocks",
+    "repo": "reinforcement-learning-stocks",
     "db_path": "db/docgraph.db",
     "task": "context map architecture data flow dependencies",
-    "expect_exclude": {"provenance": "code_ref"},
-    "note": "CLAUDE.md (the only seed for this task) has zero code_ref edges — negative control, mirrors document_parser's system_prompt.md finding: a doc with genuinely no code references should produce zero code_ref chunks, not a false positive from basename ambiguity."
+    "expect_exclude": {
+      "via": "CLAUDE.md",
+      "provenance": "code_ref"
+    },
+    "note": "CLAUDE.md has zero code_ref edges -- negative control, mirrors document_parser's system_prompt.md finding: a doc with genuinely no code references should produce zero code_ref chunks attributed to it, not a false positive from basename ambiguity. Scoped to via=CLAUDE.md specifically (not 'zero code_ref chunks in the whole pack') since the corpus has since grown a README.md that also seeds this task and has its own unrelated, real code_ref edges -- that's correct behavior, not something this fixture should exclude."
   }
 ]

@@ -24,6 +24,7 @@ Fixtures are split into buckets, reported SEPARATELY and never averaged:
 Run: python tests/run_link_fixtures.py
 """
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -32,11 +33,34 @@ from docgraph.context import retrieve  # noqa: E402
 
 FIXTURES_PATH = Path(__file__).resolve().parent / "fixtures" / "link_fixtures.json"
 
+# Fixtures reference real external repos by leaf directory name (portable
+# across machines/OSes -- see docs/HANDOFF.md's path-portability fix).
+# Point this at whatever directory holds those repos as subdirectories on
+# your machine, e.g. export DOCGRAPH_FIXTURE_REPOS_DIR=~/Projects/agentic-dev
+REPOS_DIR_ENV = "DOCGRAPH_FIXTURE_REPOS_DIR"
+
+
+class _Skip(Exception):
+    def __init__(self, reason: str):
+        self.reason = reason
+
+
+def _resolve_repo_root(case: dict) -> Path:
+    base = os.environ.get(REPOS_DIR_ENV)
+    if not base:
+        raise _Skip(f"{REPOS_DIR_ENV} not set")
+    repo_root = Path(base).expanduser() / case["repo"]
+    if not repo_root.is_dir():
+        raise _Skip(f"repo {case['repo']!r} not found under {base}")
+    return repo_root
+
 
 def _check(case: dict) -> tuple[bool, str]:
-    chunks = retrieve(
-        Path(case["repo_root"]), Path(case["db_path"]), case["task"]
-    )["chunks"]
+    db_path = Path(case["db_path"])
+    if not db_path.exists():
+        raise _Skip(f"{db_path} not present on this machine")
+    repo_root = _resolve_repo_root(case)
+    chunks = retrieve(repo_root, db_path, case["task"])["chunks"]
 
     if "expect_include" in case:
         want = case["expect_include"]
@@ -61,24 +85,37 @@ def _check(case: dict) -> tuple[bool, str]:
 
 def main() -> int:
     cases = json.loads(FIXTURES_PATH.read_text(encoding="utf-8"))
-    by_bucket: dict[str, list[tuple[dict, bool, str]]] = {}
+    # status is one of "pass", "fail", "skip" -- skip (repo/db unavailable on
+    # this machine) is not a failure, it just means this fixture can't run
+    # here. Only pass/fail affect the exit code.
+    by_bucket: dict[str, list[tuple[dict, str, str]]] = {}
     for case in cases:
-        ok, detail = _check(case)
-        by_bucket.setdefault(case["bucket"], []).append((case, ok, detail))
+        try:
+            ok, detail = _check(case)
+            status = "pass" if ok else "fail"
+        except _Skip as skip:
+            status, detail = "skip", skip.reason
+        by_bucket.setdefault(case["bucket"], []).append((case, status, detail))
 
     overall_ok = True
+    any_skipped = False
     for bucket, results in by_bucket.items():
-        passed = sum(1 for _c, ok, _d in results if ok)
-        print(f"\n=== {bucket} bucket: {passed}/{len(results)} passed ===")
-        for case, ok, detail in results:
-            status = "PASS" if ok else "FAIL"
-            print(f"  [{status}] {case['task']!r} -- {detail}")
-            if not ok:
+        passed = sum(1 for _c, s, _d in results if s == "pass")
+        runnable = sum(1 for _c, s, _d in results if s != "skip")
+        print(f"\n=== {bucket} bucket: {passed}/{runnable} passed (of {len(results)} total) ===")
+        for case, status, detail in results:
+            print(f"  [{status.upper()}] {case['task']!r} -- {detail}")
+            if status == "fail":
                 overall_ok = False
+            elif status == "skip":
+                any_skipped = True
 
     print()
+    if any_skipped:
+        print(f"Some fixtures skipped (repo/db unavailable on this machine "
+              f"-- set {REPOS_DIR_ENV} and rebuild missing dbs to run them).")
     if overall_ok:
-        print("All fixtures passed.")
+        print("All runnable fixtures passed.")
     else:
         print("Some fixtures failed.")
     return 0 if overall_ok else 1

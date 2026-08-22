@@ -18,8 +18,11 @@ that only shares generic words like "reset"/"boundary" with the task):
      only gets pulled in if it clears the SAME query bar as a real seed
      would, not just because it happens to share a directory.
 """
+import json
+import os
 import re
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import frontmatter
@@ -122,7 +125,11 @@ def retrieve(
       "chunks": [{"id", "path", "indexed_title", "heading", "token_est",
                   "score", "rank", "provenance": "seed"|"neighbor"|"link"|"code_ref",
                   "via": str | None,  # seed path that pulled in a link/code chunk
-                  "body"}, ...]
+                  "body"}, ...],
+      "budget_cut": [{"path", "heading", "provenance", "via", "rank", "token_est"}, ...]
+        # candidates that scored into `ranked` but lost to the token budget --
+        # what V2/V3/V4 tiers cost against a V1 baseline is only computable
+        # if this counterfactual is captured alongside what was selected.
     }
     """
     repo_root = repo_root.resolve()
@@ -240,12 +247,32 @@ def retrieve(
 
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
     selected, running = [], 0
+    selected_ids: set[int] = set()
     for chunk_id, _rank in ordered:
         m = meta[chunk_id]
         if running + m["token_est"] > max_tokens and selected:
             continue
         selected.append(m)
+        selected_ids.add(chunk_id)
         running += m["token_est"]
+
+    # Counterfactual: candidates that scored into `ranked` but the budget
+    # trim above didn't select -- this is what a link/code_ref/symbol tier
+    # (or a bigger seed set) may have displaced. Captured regardless of
+    # whether the query log is enabled; it's cheap and belongs with the
+    # rest of retrieve()'s structured output either way.
+    budget_cut = [
+        {
+            "path": meta[chunk_id]["path"],
+            "heading": meta[chunk_id]["heading"],
+            "provenance": provenance[chunk_id],
+            "via": via.get(chunk_id),
+            "rank": rank,
+            "token_est": meta[chunk_id]["token_est"],
+        }
+        for chunk_id, rank in ordered
+        if chunk_id not in selected_ids
+    ]
 
     chunks = []
     for m in selected:
@@ -277,13 +304,55 @@ def retrieve(
         })
 
     conn.close()
-    return {
+    result = {
         "task": task,
         "query_used": query_used,
         "budget": max_tokens,
         "total_tokens": running,
         "chunks": chunks,
+        "budget_cut": budget_cut,
     }
+    _log_query(result)
+    return result
+
+
+_QUERY_LOG_ENV = "DOCGRAPH_QUERY_LOG"
+# Opt-in (unset by default). Set via `-e DOCGRAPH_QUERY_LOG=/abs/path.jsonl`
+# on `claude mcp add` -- the MCP server is a process Claude Code spawns, not
+# a child of your interactive shell, so exporting this in a terminal never
+# reaches it. See docs/HANDOFF.md and README's registration recipe.
+
+
+def _log_query(data: dict) -> None:
+    """Append-only JSONL query log, closing the V2/V3/V4 validation gate
+    (docs/V4_NEXT_STEPS.md): does a link/code_ref/symbol-provenance chunk
+    ever get used, and what did it cost (budget_cut) against a V1 baseline.
+    Never allowed to break retrieval -- any failure here is swallowed.
+    """
+    log_path = os.environ.get(_QUERY_LOG_ENV)
+    if not log_path:
+        return
+    try:
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "task": data["task"],
+            "query_used": data["query_used"],
+            "budget": data["budget"],
+            "total_tokens": data["total_tokens"],
+            "chunks": [
+                {
+                    "path": c["path"], "heading": c["heading"],
+                    "provenance": c["provenance"], "via": c["via"],
+                    "rank": c["rank"], "token_est": c["token_est"],
+                }
+                for c in data["chunks"]
+            ],
+            "budget_cut": data["budget_cut"],
+        }
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 def build_pack(

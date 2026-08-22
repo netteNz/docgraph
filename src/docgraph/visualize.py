@@ -375,7 +375,11 @@ def graph_data(db_path: Path) -> dict:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
-    docs = conn.execute("SELECT path, bucket, indexed_title, token_est FROM docs").fetchall()
+    # bucket='code' rows are reference-driven code-file insertions (V3), not
+    # part of the markdown corpus-shape view -- they have no colocation edges
+    # of their own, so including them here only produces fabricated
+    # add_structural_ties hub-and-spoke edges. Filtered out at the source.
+    docs = conn.execute("SELECT path, bucket, indexed_title, token_est FROM docs WHERE bucket != 'code'").fetchall()
     edges = conn.execute(
         "SELECT DISTINCT source, target FROM edges WHERE kind = 'colocation' AND source < target"
     ).fetchall()  # source < target dedupes the bidirectional pair back to one line per edge

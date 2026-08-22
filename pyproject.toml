@@ -4,7 +4,7 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
     "python-frontmatter",
-    "mcp",
+    "mcp<2.0",  # mcp 2.0 dropped mcp.server.fastmcp; mcp_server.py uses FastMCP
 ]
 
 [build-system]
