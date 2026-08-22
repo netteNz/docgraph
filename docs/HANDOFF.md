@@ -2,6 +2,76 @@
 
 **Last updated**: 2026-08-22
 
+## 2026-08-22 — link fixtures actually run (not just skipped), stale dbs rebuilt
+
+Context: user asked to move from "read the session log" to "actual testing."
+Ran both test scripts fresh.
+
+`tests/run_code_fixtures.py`: 10/10 pass, no external dependency (synthetic
+fixtures).
+
+`tests/run_link_fixtures.py`: all 7 fixtures were **skipping**, not
+passing — `DOCGRAPH_FIXTURE_REPOS_DIR` wasn't set in this shell. On this
+Windows machine both referenced repos live under one common parent:
+```bash
+export DOCGRAPH_FIXTURE_REPOS_DIR=/d/code/agentic-development
+```
+(contains both `reinforcement-learning-stocks` and `coinbase-rl-bot`).
+Setting it unmasked real failures, not a clean pass: 4/7 fixtures failed
+because `db/docgraph.db` (last built 2026-08-21) and
+`db/coinbase_rl_bot.db` (last built 2026-08-18) were stale relative to
+current repo state on disk — expected files
+(`docs/SENTIMENT_INTEGRATION.md`, `scripts/analyze_reward_divergence.py`,
+`agent-api/api/main.py`) all still exist in the source repos, confirming
+this was index drift, not a code regression. Rebuilt both:
+```bash
+python -m docgraph.index /d/code/agentic-development/reinforcement-learning-stocks db/docgraph.db
+python -m docgraph.index /d/code/agentic-development/coinbase-rl-bot db/coinbase_rl_bot.db
+```
+`db/docgraph.db`: 72 files, 104 co-location edges, 2 link edges, 91
+code_ref edges, 37 code files, 542 symbol edges.
+`db/coinbase_rl_bot.db`: 9 files, 26 co-location edges, 4 link edges, 21
+code_ref edges, 10 code files, 160 symbol edges.
+After rebuild: **7/7 link fixtures pass** (3 organic, 1 hub-suppression, 3
+code). Takeaway for next session: always export
+`DOCGRAPH_FIXTURE_REPOS_DIR` before trusting a "skip" result, and rebuild
+`db/docgraph.db`/`db/coinbase_rl_bot.db` if it's been more than a day or
+two since the last index run against those repos — they drift.
+
+## 2026-08-22 — rl-stocks reindex driven through the live visualizer in Chrome
+
+Context: after rebuilding `db/docgraph.db` (see the fixtures entry above),
+user asked to actually exercise the visualizer against it rather than just
+trust the fixture pass — this is the largest corpus the graph has been
+rendered against yet (72 markdown files + 37 `code_ref`-referenced code
+files = 109 nodes, 164 edges).
+
+Served it live (`python -m docgraph.serve
+/d/code/agentic-development/reinforcement-learning-stocks db/docgraph.db
+--port 8765`) and drove it in Chrome (file:// URLs are blocked by the
+extension — must use a real served URL). Checked three things:
+
+1. **Rendering at scale**: all 109 nodes/164 edges draw correctly, code
+   files colored by extension. At full zoom-out the graph reads as a dense
+   tangle of long-range purple `code_ref` lines — legible once zoomed in or
+   nodes dragged apart, not a bug, but a real UX ceiling: this corpus is
+   already the densest tested and it only gets worse with size. Worth
+   revisiting (e.g. edge bundling, collapsing code_ref lines, or a
+   toggle to hide them) if a bigger corpus gets indexed next.
+2. **Live retrieval highlighting**: typed the task `"exit signal todo
+   plan"` (same task as the `code` bucket's fixture) into the task box —
+   correctly seeded `EXIT_SIGNAL_TODO.md`, rendered the markdown pack panel
+   (13 chunks, ~8000 token budget), and highlighted matching nodes with
+   distinct seed (green glow) vs. neighbor (gold ring) styling, matching
+   what `run_link_fixtures.py` already asserted structurally.
+3. **Console**: three `[EXCEPTION] "message channel closed..."` entries
+   appeared — this is standard Chrome-extension messaging noise (from the
+   automation extension itself), not an app error; nothing else logged.
+
+**No functional bugs found.** Verified end-to-end: index rebuild → live
+serve → real browser interaction → retrieval → visual highlight, all
+correct on the largest corpus tested so far.
+
 ## 2026-08-22 — chunking-ui indexed + registered, code_ref semantics documented, code files added as extension-colored graph nodes
 
 Context: user asked to index a new repo (`~/projects/azure-development/chunking-ui`,
