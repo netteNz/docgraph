@@ -1,0 +1,50 @@
+{
+  "logged_calls": 20,
+  "reviewed_calls": 20,
+  "pending_calls": 0,
+  "minimum_calls": 20,
+  "threshold": 0.15,
+  "packs_with_used_advanced_context": 5,
+  "usefulness_rate": 0.25,
+  "gate_ready": true,
+  "decision": "keep_or_tune",
+  "tiers": {
+    "filename": {
+      "exposed_packs": 17,
+      "used_packs": 5,
+      "selected_chunks": 115,
+      "used_chunks": 8,
+      "budget_cut_reviewed": 11,
+      "budget_cut_useful": 3,
+      "budget_cut_uncertain": 2,
+      "usefulness_rate_all_reviewed_packs": 0.25,
+      "precision_when_exposed": 0.29411764705882354
+    },
+    "link": {
+      "exposed_packs": 2,
+      "used_packs": 0,
+      "selected_chunks": 3,
+      "used_chunks": 0,
+      "budget_cut_reviewed": 2,
+      "budget_cut_useful": 0,
+      "budget_cut_uncertain": 0,
+      "usefulness_rate_all_reviewed_packs": 0.0,
+      "precision_when_exposed": 0.0
+    },
+    "seed": {
+      "exposed_packs": 0,
+      "used_packs": 0,
+      "selected_chunks": 0,
+      "used_chunks": 0,
+      "budget_cut_reviewed": 4,
+      "budget_cut_useful": 0,
+      "budget_cut_uncertain": 2,
+      "usefulness_rate_all_reviewed_packs": 0.0,
+      "precision_when_exposed": 0.0
+    }
+  },
+  "budget_cut": {
+    "useful": 3,
+    "uncertain": 4
+  }
+}

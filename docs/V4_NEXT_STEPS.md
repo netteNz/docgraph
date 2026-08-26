@@ -11,16 +11,39 @@ V3/V4 graph plumbing is present on `main`:
 
 The graph remains file-level. Clicking a code node does not yet expose its chunks or internal symbol edges.
 
-## Validation gate — required before expanding V4
+## Validation gate — run 2026-08-25, corrected 2026-08-25
 
-Use `DOCGRAPH_QUERY_LOG` for at least 20 real calls, annotating each selected link/code/symbol-derived chunk as actually used, unused, or uncertain at the time of the call. The log's `tier_detail` field distinguishes code-reference paths. Evaluate independently:
+20 real calls against the rl-stocks corpus, logged via `DOCGRAPH_QUERY_LOG`
+and annotated per-chunk (used/unused/uncertain) with `src/docgraph/validation.py`.
+Full results, per-tier evaluation, and a list of corrections applied after
+review: [validation/RL_STOCKS_VALIDATION_NOTES.md](validation/RL_STOCKS_VALIDATION_NOTES.md).
 
-1. filename-only `code_ref` chunks;
-2. symbol-resolved `code_ref` chunks;
-3. symbol-neighbor expansion; and
-4. useful chunks displaced into `budget_cut`.
+An earlier version of this section reported *exposure* (85% of calls had a
+selected `code_ref` chunk) as if it were *usefulness*. With real per-chunk
+annotation the actual usefulness rate is 25% of calls (5/20, `decision:
+keep_or_tune` against the 15% threshold) — clears the gate, but on thin
+margin: only 8 of 115 selected `code_ref` chunks (7%) were judged actually
+used. Outcome per tier:
 
-Do not treat V2–V4 as one tier. Keep, tune, or remove each tier from this evidence. The original 15%-of-packs usefulness threshold is a provisional kill criterion; record any revised threshold before inspecting the results.
+1. filename-only `code_ref` — 25% of packs have a used chunk (7% of
+   individual chunks), **keep, but tune** — clears the threshold but most
+   of what it selects per pack is unused filler.
+2. symbol-resolved `code_ref` — 0% of packs, never once selected across 20
+   calls, **candidate for removal**.
+3. symbol-neighbor expansion — 0% of packs (never reached), **candidate for removal**.
+4. useful chunks displaced into `budget_cut` — confirmed twice (not once):
+   `src/exit_manager.py` lost its slot to an unrelated whole-file chunk via
+   alphabetical `ORDER BY target`; separately, `generate_rollback_guide`
+   lost its slot in one call to a same-file, alphabetically/document-order-earlier
+   `utc_now()` helper, then *was* selected for a near-identical rephrased
+   task in the next call — proving the miss is an ordering artifact, not a
+   retrieval gap. Full `budget_cut` review (787 candidates) is not done;
+   only 15 were reviewed.
+
+Not yet done: removing/reranking the symbol tier, fixing in-tier chunk
+ordering (`ORDER BY target` / `ORDER BY c.id` carry no relevance signal),
+and re-running this same 20-task set to confirm a fix changes outcomes, not
+just ranking theory.
 
 ## Next UX work, after the gate
 
