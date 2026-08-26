@@ -30,15 +30,14 @@ repo markdown
 discover.py    4-bucket rule: root files, docs/, skills/, monorepo
      │         subproject READMEs (all-caps filename, one level deep)
      ▼
-index.py       SQLite + FTS5 (porter stemming), recursive H2→H4 chunking
-     │         for long catalog docs, content-hash dedup, size-capped
-     │         co-location edges between files in the same directory
+index.py       SQLite + FTS5 (porter stemming), recursive H2→H4 chunking,
+     │         content-hash dedup; link, code-reference, and symbol edges
      ▼
 db/docgraph.db
      │
      ▼
-context.py     task → AND-first/OR-fallback FTS query → co-location
-     │         neighbor expansion (score-floored) → token-budget trim
+context.py     task → AND-first/OR-fallback FTS query → co-location, link,
+     │         then code-reference expansion → token-budget trim
      ├─────────────────────────────┐
      ▼                             ▼
 mcp_server.py                  serve.py       live web graph: task box ->
@@ -77,6 +76,18 @@ python -m docgraph.serve /path/to/repo db/my-repo.db --port 8765
 Task strings are used as keyword search, not semantic search — be specific,
 and avoid naming a file you're about to create (it can't match anything
 that doesn't exist yet).
+
+### Index freshness
+
+Indexes store metadata and hashes, not source bodies. Before retrieval,
+DocGraph compares every indexed source file with its stored hash and fails
+closed if any source changed, disappeared, or cannot be read. Rebuild after
+source changes rather than accepting a silently wrong section or whole-file
+fallback:
+
+```bash
+python -m docgraph.index /path/to/repo db/my-repo.db
+```
 
 ### Registering with Claude Code
 
@@ -121,10 +132,12 @@ The same force-directed corpus graph as `visualize.py`, served locally
 - A task box that calls real retrieval (`context.retrieve`) and highlights
   which file nodes were actually selected into the pack — solid glow for
   seed matches, dashed for co-location neighbors pulled in via expansion —
-  dimming everything else.
+  with link and code-reference chunks represented in the pack. Referenced
+  code files appear as extension-colored nodes; purple `code_ref` edges are
+  directional from documentation to code.
 - A resizable side panel rendering the selected pack as formatted markdown
-  (headings, code blocks, tables — via `marked`, CDN-loaded like D3). Drag
-  its left edge or click the `⤢` button to expand it.
+  (headings, code blocks, tables — via `marked`, sanitized by DOMPurify).
+  Drag its left edge or click the `⤢` button to expand it.
 - A status line under the box showing chunk count, and graceful empty-state
   when a task matches nothing.
 
@@ -161,6 +174,12 @@ Any bucket can be excluded per-run with `--exclude-bucket`.
   below every seed and co-location neighbor. A per-doc fan-out cap drops
   *all* link edges from a hub doc (an INDEX.md linking to everything)
   rather than truncating an arbitrary subset.
+- **Code references and symbols (V3/V4).** Backticked code filenames and
+  fenced code snippets create directional `code_ref` edges to real source
+  files. An inline-backticked symbol can refine a Python target to a def/class
+  chunk and add bounded intra-file symbol neighbors. Every fan-out cap is
+  skip-not-truncate. Python is AST-sliced; JS/TS/Go/Rust remain deliberate
+  whole-file references until language-specific parsers are added.
 - **Recursive chunking, not fixed-depth.** Long docs split at H2; any
   section still oversized with real substructure splits again at H3, then
   H4. Some repos have flat catalogs of H2 sections, others have one

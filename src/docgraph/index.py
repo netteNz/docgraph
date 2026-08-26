@@ -416,6 +416,12 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
 
     for source, targets in per_doc_targets.items():
         for target in targets:
+            # A discovered file can become unreadable before it is inserted.
+            # Never persist a reference to a code node/chunk that does not
+            # exist in this rebuild.
+            code_path, _heading = split_code_key(target)
+            if code_path not in inserted:
+                continue
             conn.execute(
                 "INSERT OR IGNORE INTO edges(source,target,kind,weight) VALUES(?,?,?,?)",
                 (source, target, "code_ref", 1.0),

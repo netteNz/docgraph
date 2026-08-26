@@ -7,6 +7,18 @@ dependencies = [
     "mcp<2.0",  # mcp 2.0 dropped mcp.server.fastmcp; mcp_server.py uses FastMCP
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --basetemp=.pytest-tmp"
+markers = [
+    "external_fixture: requires DOCGRAPH_FIXTURE_REPOS_DIR and its indexed repositories",
+]
+
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"

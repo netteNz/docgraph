@@ -31,6 +31,7 @@ SERVE_TEMPLATE = """<!DOCTYPE html>
 <title>DocGraph — {title}</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.2.6/purify.min.js"></script>
 <style>
   * {{ box-sizing: border-box; }}
   body {{ margin: 0; font-family: system-ui, sans-serif; background: #0d1117; color: #c9d1d9; overflow: hidden; }}
@@ -397,6 +398,14 @@ function escapeHtml(s) {{
   return s.replace(/[&<>"']/g, c => ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}})[c]);
 }}
 
+function renderMarkdownSafely(markdown) {{
+  const rendered = marked.parse(markdown);
+  // Repository content is untrusted input even in a localhost viewer.
+  // If the sanitizer CDN is unavailable, render escaped source rather than
+  // inserting marked's unsanitized HTML.
+  return window.DOMPurify ? DOMPurify.sanitize(rendered) : `<pre>${{escapeHtml(markdown)}}</pre>`;
+}}
+
 function clearQuery() {{
   taskInput.value = "";
   resetHighlight();
@@ -421,8 +430,8 @@ function renderPack(json) {{
     // CLI/MCP text output, so decorators/indentation/docstrings don't get
     // mangled by markdown parsing.
     const rendered = c.provenance === "code_ref"
-      ? marked.parse("```" + (c.path.split(".").pop() || "") + "\\n" + c.body + "\\n```")
-      : marked.parse(c.body);
+      ? renderMarkdownSafely("```" + (c.path.split(".").pop() || "") + "\\n" + c.body + "\\n```")
+      : renderMarkdownSafely(c.body);
     html += `<div class="chunk" data-path="${{escapeHtml(c.path)}}">
       <h3>${{escapeHtml(c.indexed_title)}}<span class="badge ${{c.provenance}}">${{c.provenance}}</span></h3>
       <div class="chunkSrc">${{escapeHtml(loc)}}</div>

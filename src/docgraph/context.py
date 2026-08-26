@@ -18,6 +18,7 @@ that only shares generic words like "reset"/"boundary" with the task):
      only gets pulled in if it clears the SAME query bar as a real seed
      would, not just because it happens to share a directory.
 """
+import hashlib
 import json
 import os
 import re
@@ -30,6 +31,49 @@ import frontmatter
 from .code_chunks import extract_chunk as _extract_code_chunk
 from .code_refs import CODE_EXTENSIONS, split_code_key
 from .sections import extract_section
+
+
+class IndexStaleError(RuntimeError):
+    """The repository no longer matches the content used to build an index."""
+
+
+def _source_hash(raw: str) -> str:
+    """Match index.py's persisted, truncated source hash exactly."""
+    return hashlib.sha256(raw.encode()).hexdigest()[:12]
+
+
+def _require_fresh_sources(conn: sqlite3.Connection, repo_root: Path) -> None:
+    """Fail before ranking when indexed source content has changed or vanished.
+
+    Chunk bodies are intentionally not stored in SQLite. Rendering against a
+    changed working tree could otherwise silently select a different section
+    or fall back to the entire file when an indexed heading disappears.
+    """
+    stale: list[str] = []
+    unreadable: list[str] = []
+    for row in conn.execute("SELECT path, hash FROM docs ORDER BY path"):
+        try:
+            raw = (repo_root / row["path"]).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            unreadable.append(row["path"])
+            continue
+        if _source_hash(raw) != row["hash"]:
+            stale.append(row["path"])
+
+    if stale or unreadable:
+        details = []
+        if stale:
+            details.append("changed: " + ", ".join(stale[:3]))
+        if unreadable:
+            details.append("missing/unreadable: " + ", ".join(unreadable[:3]))
+        extra = len(stale) + len(unreadable) - 3
+        suffix = f" (+{extra} more)" if extra > 0 else ""
+        raise IndexStaleError(
+            "index is stale relative to the source repository ("
+            + "; ".join(details)
+            + suffix
+            + "); rebuild it with `python -m docgraph.index <repo_root> <db_path>`"
+        )
 
 _WORD_RE = re.compile(r"[A-Za-z0-9_]+")
 # Bare file extensions never carry topical content — they only ever show up
@@ -124,6 +168,7 @@ def retrieve(
       "task": str, "query_used": "AND"|"OR", "budget": int, "total_tokens": int,
       "chunks": [{"id", "path", "indexed_title", "heading", "token_est",
                   "score", "rank", "provenance": "seed"|"neighbor"|"link"|"code_ref",
+                  "tier_detail": "filename"|"symbol_target"|"symbol_neighbor"|...,
                   "via": str | None,  # seed path that pulled in a link/code chunk
                   "body"}, ...],
       "budget_cut": [{"path", "heading", "provenance", "via", "rank", "token_est"}, ...]
@@ -135,6 +180,11 @@ def retrieve(
     repo_root = repo_root.resolve()
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    try:
+        _require_fresh_sources(conn, repo_root)
+    except Exception:
+        conn.close()
+        raise
 
     words = _fts_words(task)
     seeds = conn.execute(_SEED_SQL, (_fts_query(words, "AND"), seed_limit)).fetchall()
@@ -151,6 +201,7 @@ def retrieve(
     ranked: dict[int, float] = {}
     meta: dict[int, sqlite3.Row] = {}
     provenance: dict[int, str] = {}
+    tier_detail: dict[int, str] = {}
     via: dict[int, str] = {}
     for i, row in enumerate(seeds):
         ranked[row["id"]] = float(i)
@@ -228,21 +279,32 @@ def retrieve(
                     if nc:
                         neighbor_chunks.append(nc)
                 preamble = conn.execute(_CODE_CHUNK_SQL, (code_path, None)).fetchone()
-                group = ([preamble] if preamble else []) + [seed_chunk] + neighbor_chunks
+                group = []
+                if preamble:
+                    group.append((preamble, "symbol_preamble"))
+                group.append((seed_chunk, "symbol_target"))
+                group.extend((chunk, "symbol_neighbor") for chunk in neighbor_chunks)
                 if len(group) > MAX_SYMBOL_FANOUT:
-                    group = conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+                    group = [
+                        (chunk, "symbol_fallback")
+                        for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+                    ]
             else:
                 # Filename-only: preamble + every chunk in the file, in
                 # document order, budget-trimmed downstream same as V3's
                 # whole-file inclusion — just now cut at def boundaries
                 # instead of mid-function.
-                group = conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+                group = [
+                    (chunk, "filename")
+                    for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+                ]
 
-            for k, cc in enumerate(group):
+            for k, (cc, detail) in enumerate(group):
                 if cc["id"] not in ranked:
                     ranked[cc["id"]] = CODE_TIER_BASE + i + j / 100.0 + k / 10000.0
                     meta[cc["id"]] = cc
                     provenance[cc["id"]] = "code_ref"
+                    tier_detail[cc["id"]] = detail
                     via[cc["id"]] = row["path"]
 
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
@@ -266,6 +328,7 @@ def retrieve(
             "path": meta[chunk_id]["path"],
             "heading": meta[chunk_id]["heading"],
             "provenance": provenance[chunk_id],
+            "tier_detail": tier_detail.get(chunk_id),
             "via": via.get(chunk_id),
             "rank": rank,
             "token_est": meta[chunk_id]["token_est"],
@@ -299,6 +362,7 @@ def retrieve(
             "score": m["score"],
             "rank": ranked[chunk_id],
             "provenance": provenance[chunk_id],
+            "tier_detail": tier_detail.get(chunk_id),
             "via": via.get(chunk_id),
             "body": body,
         })
@@ -342,7 +406,7 @@ def _log_query(data: dict) -> None:
             "chunks": [
                 {
                     "path": c["path"], "heading": c["heading"],
-                    "provenance": c["provenance"], "via": c["via"],
+                    "provenance": c["provenance"], "tier_detail": c["tier_detail"], "via": c["via"],
                     "rank": c["rank"], "token_est": c["token_est"],
                 }
                 for c in data["chunks"]
