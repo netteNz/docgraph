@@ -25,6 +25,7 @@ docgraph_out.txt
 # Editor / OS
 .vscode/
 .DS_Store
+.pytest-tmp/
 
 # Local Claude Code project notes (not shared via git)
 CLAUDE.md
