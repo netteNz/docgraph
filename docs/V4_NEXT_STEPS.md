@@ -97,6 +97,52 @@ reached). This is recorded as a known limitation, not fixed here.
 See [validation/RL_STOCKS_VALIDATION_NOTES.md](validation/RL_STOCKS_VALIDATION_NOTES.md)
 for the before/after gate rerun this fix motivated.
 
+## Gate rerun after the ranking fix (2026-09-03)
+
+Same 20 rl-stocks tasks re-run against the unchanged `db/rl-stocks.db` (no
+reindex needed — the fix is retrieval-only), logged to
+`docs/validation/rl-stocks_query_log_v2.jsonl` and annotated the same way as
+the first pass. Full detail:
+[validation/RL_STOCKS_VALIDATION_NOTES.md](validation/RL_STOCKS_VALIDATION_NOTES.md#gate-rerun-after-the-ranking-fix-2026-09-03).
+
+- **`legacy-1` (ExitManager) flips as intended**: `src/exit_manager.py` is
+  now selected; `analyze_reward_divergence.py` (the 4413-token unsliceable
+  blob that starved it before) is now budget-cut by the oversized-whole-file
+  demotion.
+- **`legacy-10`/`legacy-11` (rollback guide) do not flip the way hoped, and
+  one regresses**: `legacy-10` still never selects `generate_rollback_guide`
+  (a different, tiny, off-topic chunk wins instead — the seed tier simply
+  consumed most of the budget first). `legacy-11` is a genuine regression:
+  `generate_rollback_guide` *was* selected and used in the first pass for
+  this exact call, and is now budget-cut, because breadth-first expansion
+  now spreads the budget shallowly across three code_ref targets for that
+  seed (a third target, `test_sanitize_apply.py`, is newly in the mix)
+  instead of going deep into the one target where the answer sits at
+  position 21.
+- **`legacy-19` (news integration) also regresses**: `src/news_data.py`'s
+  `SentimentResult` — selected and used in the first pass — is now
+  budget-cut in favor of `market_data.py`'s interval helpers.
+- **Overall usefulness rate is unchanged: 25% (5/20 calls)**, but the
+  *composition* changed — `legacy-1` and `legacy-5` (a new plausible hit,
+  `src/train_bot.py`, on a GPU-configuration task) became used calls;
+  `legacy-11` and `legacy-19` stopped being used calls. The fix traded one
+  set of wins for another rather than producing a net improvement.
+- **Symbol-resolved `code_ref` is still 0/20** — no symbol-tier chunk was
+  ever selected in this rerun either. Expected: symbol-first ordering was
+  tried and reverted (see above), so this configuration gives symbols no
+  promotion over filename fallbacks. **Caveat, not a clean verdict**: this
+  is evidence about *this specific configuration* (breadth-first + demotion,
+  `ORDER BY target` unchanged), not proof symbols are inherently useless —
+  that question still needs a run where symbols can actually outrank a
+  filename fallback before it's answered cleanly.
+
+**Decision**: keep the symbol-resolution tier's code and edges (removal
+isn't justified — it's never been tested in a configuration where it could
+win), but its "candidate for removal" flag from the first pass stands
+un-resolved rather than confirmed. Do not claim the ranking fix as a net
+usefulness win; it fixed one confirmed case, left one unrepaired, and
+regressed two previously-good ones on this same 20-call set.
+
 ## Next UX work, after the gate
 
 1. Add independent visibility toggles for `code_ref`, co-location, and structural edges; purple code edges can clutter large graphs.

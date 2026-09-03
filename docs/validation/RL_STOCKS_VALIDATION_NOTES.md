@@ -202,3 +202,100 @@ target-major `j`-major). `ORDER BY target` remains the plain alphabetical
 tiebreak for cross-file target selection; symbol-first ordering was tried
 separately and reverted (see `docs/V4_NEXT_STEPS.md`). See that file's
 "Ranking fix shipped" section for the after-numbers from the gate rerun.
+
+## Gate rerun after the ranking fix (2026-09-03)
+
+Same reproduction recipe as above, pointed at a new log file so the
+original stays the "before" baseline:
+
+```bash
+export DOCGRAPH_QUERY_LOG=docs/validation/rl-stocks_query_log_v2.jsonl
+PYTHONIOENCODING=utf-8 python -m docgraph.context \
+  "D:/code/agentic-development/reinforcement-learning-stocks" db/rl-stocks.db \
+  "<task>" --max-tokens 8000
+
+python -m docgraph.validation report docs/validation/rl-stocks_query_log_v2.jsonl
+```
+
+Same 20 task strings from `rl-stocks_query_log.jsonl`, same `db/rl-stocks.db`
+(no reindex — the fix is retrieval-only). Annotated the same way as the
+first pass (per-chunk judgment written directly against `validation.py`'s
+JSONL schema): `docs/validation/rl-stocks_query_log_v2.annotations.jsonl`.
+
+### Tool-computed result (after)
+
+```
+Calls: 20/20 reviewed (minimum 20)
+Packs with used advanced context: 5 (25.0%)
+Pre-registered threshold: 15.0%
+Gate: keep_or_tune
+Useful budget-cut candidates: 3 (0 uncertain)
+```
+
+| Tier | Exposed packs | Used packs | Precision | Selected/used chunks | Useful budget cuts |
+|---|---:|---:|---:|---:|---:|
+| filename `code_ref` | 18 | 5 | 27.8% | 143 / 8 | 3 / 5 reviewed |
+| `link` | 3 | 0 | 0.0% | 6 / 0 | 0 / 0 reviewed |
+| symbol-resolved `code_ref` | 0 | 0 | — | 0 / 0 | not exposed |
+
+The pack-level usefulness rate is **numerically identical to the first
+pass, 25% (5/20)** — but the two numbers are not the same evidence. The
+*set* of used calls changed:
+
+- **`legacy-1` (write tests for ExitManager) — flips as intended.**
+  `src/exit_manager.py` is now selected and judged used.
+  `scripts/analyze_reward_divergence.py` — the 4413-token unsliceable blob
+  that starved it out before — is now budget-cut at rank `20.5`, exactly
+  where the oversized-whole-file demotion places it. This is the fix
+  working as designed on the case it was built for.
+- **`legacy-5` (GPU acceleration configured for training) — new hit.**
+  `src/train_bot.py` (1542 tokens, under the demotion threshold) is now
+  selected and is a plausible real answer for this task; the first pass
+  never surfaced it, only the same unrelated `utc_now()` cluster.
+- **`legacy-10` (how do I roll back a promoted model) — still doesn't
+  flip.** `generate_rollback_guide` is still budget-cut (rank `22.21`);
+  the only selected advanced chunk this time is an unrelated
+  `test_sanitize_apply.py` preamble. The seed/co-location tiers consumed
+  most of the 8000-token budget before the code tier's turn — this call's
+  miss was never really about in-tier ordering.
+- **`legacy-11` (what is the rollback guide procedure) — regresses.**
+  `generate_rollback_guide` *was* selected and judged used for this exact
+  call in the first pass. It is now budget-cut. Cause: breadth-first
+  `k`-major expansion now interleaves **three** code_ref targets for this
+  seed (`sanitize_apply.py`, `sanity_scan.py`, and `test_sanitize_apply.py`
+  — a target not present in the first pass's selection at all), so the
+  budget is spent going shallow across all three targets instead of deep
+  into the one where the answer sits at position `k=21`. This is exactly
+  the trade-off the superseding plan predicted was possible but didn't
+  have a repro for: breadth-first is not a strict improvement over
+  target-major, it just moves which shape of miss is more likely.
+- **`legacy-19` (how is news data integrated into features) — regresses.**
+  `src/news_data.py`'s `SentimentResult` — selected and used in the first
+  pass — is now budget-cut in favor of `src/market_data.py`'s interval
+  helpers (the same file that was noise in the first pass, now winning
+  outright).
+- **Symbol-resolved `code_ref` is still 0/20**, same as the first pass.
+  This is expected, not new evidence either way: symbol-first ordering was
+  tried and reverted, so this configuration gives symbol targets no
+  promotion over filename fallbacks — the mechanism that caused 0/20 the
+  first time is unchanged. **Caveat, stated explicitly per the gate-rerun
+  plan**: this confirms symbols are still *unreached* under this specific
+  configuration, not that they are *useless* — that distinction still
+  requires a run where a symbol target can actually outrank a filename
+  fallback, which hasn't been done.
+
+### Decision
+
+Do not remove the symbol-resolution tier: its "candidate for removal"
+status from the first pass is neither confirmed nor cleared by this rerun,
+since the rerun never gave it a fair chance to surface. Do not report the
+ranking fix as a net usefulness improvement on this 20-call set: it
+repaired the case it was designed for (`legacy-1`), left the other
+confirmed case unrepaired (`legacy-10`), and introduced two new regressions
+(`legacy-11`, `legacy-19`) via the same breadth-first mechanism that fixed
+`legacy-1`'s sibling case. The net pack-level rate is flat. This is useful,
+honest evidence that in-tier ordering changes trade one failure mode for
+another rather than eliminating the underlying problem (no relevance
+signal in the code tier at all) — consistent with what
+`docs/plans/2026-08-28-233850-cost-aware-code-tier-selection-supersedes-ranking-.md`
+already said about the root cause.
