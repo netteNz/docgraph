@@ -154,6 +154,23 @@ MAX_SYMBOL_FANOUT = 5
 # discarded and degraded to the filename-only fallback (all chunks in the
 # file, document order) rather than truncated to an arbitrary subset.
 
+OVERSIZED_WHOLE_FILE_BUDGET_FRACTION = 0.25
+# A *whole-file* code chunk (heading IS NULL) claiming more than this share of
+# the entire token budget is an unsliceable script — `code_chunks.py`'s
+# def/class slicer found no top-level structure, so the file is one indivisible
+# blob (rl-stocks: `scripts/analyze_reward_divergence.py`, 444 lines, zero
+# top-level defs, 4413 tokens = 55% of a default pack). Admitted first, it
+# starves every other code target; there is no way to trim it, so it defers to
+# the back of its own seed's code band instead.
+#
+# Expressed as a fraction of the budget rather than an absolute token count on
+# purpose: the harm is "one chunk eats the pack", which is inherently relative,
+# and a fixed constant would have to be tuned against whichever file we last
+# looked at. Two things are deliberately exempt: a sliceable file's small
+# preamble (heading IS NULL but tiny), and every symbol chunk (heading NOT
+# NULL) — a large named function is often exactly the answer, so size alone
+# is not grounds to demote it.
+
 
 def retrieve(
     repo_root: Path,
@@ -253,6 +270,12 @@ def retrieve(
     CODE_TIER_BASE = seed_limit * 2
     for i, row in enumerate(seeds):
         code_targets = conn.execute(
+            # NOTE: promoting symbol-resolved targets ("path#heading") ahead
+            # of filename fallbacks was tried and reverted — it shifts every
+            # later target down one slot, and on rl-stocks that pushed
+            # `src/exit_manager.py` past MAX_CODE_NEIGHBORS_PER_SEED so it
+            # stopped being a candidate at all. Any retry needs to widen the
+            # LIMIT in the same change, not just reorder within it.
             "SELECT target FROM edges WHERE source = ? AND kind = 'code_ref' "
             "ORDER BY target LIMIT ?",
             (row["path"], MAX_CODE_NEIGHBORS_PER_SEED),
@@ -299,9 +322,33 @@ def retrieve(
                     for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
                 ]
 
+            oversized = max_tokens * OVERSIZED_WHOLE_FILE_BUDGET_FRACTION
             for k, (cc, detail) in enumerate(group):
                 if cc["id"] not in ranked:
-                    ranked[cc["id"]] = CODE_TIER_BASE + i + j / 100.0 + k / 10000.0
+                    # k is the MAJOR axis and j is minor (breadth-first): all
+                    # targets' position-0 chunk (preamble, or first chunk in
+                    # doc order) outrank any target's position-1 chunk, etc.
+                    # Target-major (j major) was the bug behind the rollback
+                    # gate failure — a same-seed doc that resolves two
+                    # SEPARATE symbol targets in the same file (e.g. an
+                    # earlier-defined `utc_now` and a later-defined
+                    # `generate_rollback_guide`, each its own `code_targets`
+                    # entry) would fully expand the alphabetically/lexically
+                    # first target's whole group before the second target
+                    # got a single chunk in, starving the on-topic one under
+                    # a tight budget purely by document order. j stays
+                    # bounded by MAX_CODE_NEIGHBORS_PER_SEED-1 (<=4) and k is
+                    # assumed to stay under 100 per target (largest observed
+                    # group in production data was 26 chunks) — if a target
+                    # ever produces >=100 chunks, k/100 would collide with
+                    # the next integer step of i; widen the divisor before
+                    # that becomes possible.
+                    penalty = 0.5 if (
+                        cc["heading"] is None and cc["token_est"] > oversized
+                    ) else 0.0
+                    ranked[cc["id"]] = (
+                        CODE_TIER_BASE + i + penalty + k / 100.0 + j / 10000.0
+                    )
                     meta[cc["id"]] = cc
                     provenance[cc["id"]] = "code_ref"
                     tier_detail[cc["id"]] = detail

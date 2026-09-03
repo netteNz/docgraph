@@ -185,3 +185,20 @@ used/unused calls, particularly the `uncertain` ones.
    selected-chunk-only gate as sufficient going forward — right now the
    `useful`/`not_useful` breakdown among cuts is too small a sample to be
    more than anecdotal support for point 2.
+
+**Correction (2026-09-03):** point 2 above proposed replacing
+`ORDER BY target` / `ORDER BY c.id` with a relevance-bearing signal.
+Testing that literally (mention-count `edges.weight` as the replacement
+tiebreak) against this corpus showed the signal points the wrong way on
+the confirmed `exit_manager.py` case — `analyze_reward_divergence.py` has
+*more* mentions (2 vs. 1), so weight-ordering cements the same wrong
+target ahead, just with a more principled-looking justification. See
+`docs/plans/2026-08-28-233850-cost-aware-code-tier-selection-supersedes-ranking-.md`
+for the full evidence. The fix that actually shipped replaces neither
+`ORDER BY` clause: it adds a rank-time demotion for oversized whole-file
+chunks (`OVERSIZED_WHOLE_FILE_BUDGET_FRACTION`) and reorders which axis of
+the in-tier rank formula is major (breadth-first `k`-major instead of
+target-major `j`-major). `ORDER BY target` remains the plain alphabetical
+tiebreak for cross-file target selection; symbol-first ordering was tried
+separately and reverted (see `docs/V4_NEXT_STEPS.md`). See that file's
+"Ranking fix shipped" section for the after-numbers from the gate rerun.

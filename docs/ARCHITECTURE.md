@@ -6,7 +6,7 @@ at headings. The index records three retrieval edge families:
 - `colocation`: bidirectional, immediate-directory relationships;
 - `link`: directional Markdown links, capped per source document;
 - `code_ref`: directional documentation-to-code references, optionally
-  symbol-resolved to a Python def/class chunk.
+  resolved to a specific Python def/class chunk via `symbol` edges;
 
 Referenced code files are `bucket='code'` nodes without FTS rows, so they are
 reachable only through `code_ref`. Python receives AST-based def/class slicing

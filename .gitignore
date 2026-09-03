@@ -29,3 +29,5 @@ docgraph_out.txt
 
 # Local Claude Code project notes (not shared via git)
 CLAUDE.md
+
+.claude/settings.local.json

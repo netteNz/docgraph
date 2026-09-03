@@ -32,18 +32,70 @@ used. Outcome per tier:
    calls, **candidate for removal**.
 3. symbol-neighbor expansion — 0% of packs (never reached), **candidate for removal**.
 4. useful chunks displaced into `budget_cut` — confirmed twice (not once):
-   `src/exit_manager.py` lost its slot to an unrelated whole-file chunk via
-   alphabetical `ORDER BY target`; separately, `generate_rollback_guide`
-   lost its slot in one call to a same-file, alphabetically/document-order-earlier
-   `utc_now()` helper, then *was* selected for a near-identical rephrased
-   task in the next call — proving the miss is an ordering artifact, not a
-   retrieval gap. Full `budget_cut` review (787 candidates) is not done;
-   only 15 were reviewed.
+   `src/exit_manager.py` lost its slot to an unrelated whole-file chunk;
+   separately, `generate_rollback_guide` lost its slot in one call to a
+   same-file `utc_now()` helper, then *was* selected for a near-identical
+   rephrased task in the next call — proving the miss is an ordering
+   artifact, not a retrieval gap. Full `budget_cut` review (787 candidates)
+   is not done; only 15 were reviewed.
 
-Not yet done: removing/reranking the symbol tier, fixing in-tier chunk
-ordering (`ORDER BY target` / `ORDER BY c.id` carry no relevance signal),
-and re-running this same 20-task set to confirm a fix changes outcomes, not
-just ranking theory.
+   Correction (2026-08-28/09-03): the `exit_manager.py` miss was originally
+   attributed to alphabetical `ORDER BY target` alone. The real mechanism,
+   found while investigating a fix: `scripts/analyze_reward_divergence.py`
+   is 444 lines with zero top-level `def`/`class`, so the code slicer can't
+   split it — it lands as one indivisible 4413-token chunk (~55% of an
+   8000-token budget in a single bite), admitted first purely because it
+   sits earlier in target order. Alphabetical order picked which target
+   went first; it's the chunk's unsliceable size that made winning that
+   slot catastrophic for the other target.
+
+## Ranking fix shipped (2026-09-03)
+
+Two changes landed in `src/docgraph/context.py`, replacing the "Not yet
+done" item above:
+
+1. **Oversized-whole-file demotion.** A whole-file code chunk
+   (`heading IS NULL`) whose token count exceeds
+   `OVERSIZED_WHOLE_FILE_BUDGET_FRACTION` (0.25) of `max_tokens` gets a
+   rank penalty (`+0.5`, sorts after all normal chunks in the same seed's
+   code band, never spilling into the next seed's band). This is a
+   demotion, not a hard cap or a trim — it only defers the chunk to the
+   back of its own tier. Small preambles and all symbol chunks (`heading
+   NOT NULL`) are exempt: size alone isn't grounds to demote a named
+   function, which is often exactly the answer.
+2. **Breadth-first `k`-major expansion.** The rank formula's axes were
+   swapped so all targets' position-0 chunk outranks any target's
+   position-1 chunk, round-robin across targets, instead of one target's
+   whole expansion group finishing before the next target gets a chunk in.
+   This targets the `generate_rollback_guide`-vs-`utc_now()` case: two
+   *separate* symbol targets in the *same file* (not two positions within
+   one target's group), where target-major expansion let the
+   earlier-defined target's slot claim priority regardless of relevance.
+
+**Deliberately not changed:**
+- `ORDER BY target` (plain alphabetical) is still the tiebreak for
+  cross-file target selection. Symbol-first ordering
+  (`ORDER BY (target LIKE '%#%') DESC, target ASC`) was tried and
+  reverted — it shifts every later target down one slot, and on rl-stocks
+  that pushed `src/exit_manager.py` past `MAX_CODE_NEIGHBORS_PER_SEED`,
+  removing it as a candidate entirely.
+- `edges.weight` stays hardcoded `1.0`. A mention-count weighting scheme
+  was considered and rejected: on the confirmed `exit_manager.py` failure,
+  mention count points the wrong way (2 mentions for the unrelated file
+  vs. 1 for the correct one).
+- No per-target budget-share cap exists. A `CODE_TARGET_BUDGET_SHARE`
+  constant with per-path token accounting in the fill loop was proposed
+  but never implemented; the fill loop still tracks only a single scalar
+  `running` against `max_tokens`.
+
+**Known deferred gap:** an unsliceable large file is now demoted rather
+than trimmed, which means at a small enough budget it can become
+effectively unreachable (it always defers behind everything else in its
+band, and a small budget may never have room left once that band is
+reached). This is recorded as a known limitation, not fixed here.
+
+See [validation/RL_STOCKS_VALIDATION_NOTES.md](validation/RL_STOCKS_VALIDATION_NOTES.md)
+for the before/after gate rerun this fix motivated.
 
 ## Next UX work, after the gate
 
