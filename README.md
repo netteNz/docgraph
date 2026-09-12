@@ -1,5 +1,11 @@
 # DocGraph
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/nettenz-docgraph-1bna4l?v=db56bd3c20a931839bc0ff8bbbf4f420)](https://m8ven.ai/mcp/nettenz-docgraph-1bna4l)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
+[![MCP](https://img.shields.io/badge/protocol-MCP-5A67D8)](https://modelcontextprotocol.io)
+[![SQLite FTS5](https://img.shields.io/badge/index-SQLite%20FTS5-003B57)](docs)
+[![License](https://img.shields.io/badge/license-none%20specified-lightgrey)](#license)
+
 Repo-native markdown context broker — an MCP tool that gives coding agents
 task-relevant docs instead of dumping `docs/**`.
 
