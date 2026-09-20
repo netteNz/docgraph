@@ -37,13 +37,26 @@ used. Outcome per tier:
    lost its slot in one call to a same-file, alphabetically/document-order-earlier
    `utc_now()` helper, then *was* selected for a near-identical rephrased
    task in the next call — proving the miss is an ordering artifact, not a
-   retrieval gap. Full `budget_cut` review (787 candidates) is not done;
-   only 15 were reviewed.
+   retrieval gap. Both are now fixed cases: `exit_manager.py`'s alphabetical
+   `ORDER BY target` and `generate_rollback_guide`'s document-order tiebreak
+   are exactly what relevance ranking (above) replaces — see
+   `cross_file_target_ordering_exit_manager` and `in_file_ordering_rollback`
+   in `tests/fixtures/retrieval_fixtures.json`. Full `budget_cut` review
+   (787 candidates) is not done; only 15 were reviewed.
 
-Not yet done: removing/reranking the symbol tier, fixing in-tier chunk
-ordering (`ORDER BY target` / `ORDER BY c.id` carry no relevance signal),
-and re-running this same 20-task set to confirm a fix changes outcomes, not
-just ranking theory.
+**Update, 2026-09-20:** in-tier chunk ordering is fixed — see
+[RETRIEVAL_RANKING_PLAN.md](RETRIEVAL_RANKING_PLAN.md). `code_ref` chunks
+are now ranked by `code_fts` relevance instead of document/alphabetical
+order, with a reserved budget share so a seed-heavy pack can't starve the
+tier to zero before it's reached; `link` chunks and targets are ranked by
+`docs_fts` relevance the same way. The "candidate for removal" call on the
+symbol tier above turned out to rest on a false premise (filename and
+symbol targets are mutually exclusive per file, `index.py:346` — they were
+never actually competing for the same slot; symbol targets are simply
+rare, ~6% of `code_ref` edges across the checked-in indexes), so it was
+**not** removed. Re-measuring the symbol tier and re-running this 20-task
+set against the fixed ordering are both still outstanding — see
+RETRIEVAL_RANKING_PLAN.md's Follow-ups.
 
 ## Next UX work, after the gate
 

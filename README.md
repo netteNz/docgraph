@@ -179,13 +179,24 @@ Any bucket can be excluded per-run with `--exclude-bucket`.
   `retrieve()` unconditionally (no FTS gate) as the lowest-ranked tier,
   below every seed and co-location neighbor. A per-doc fan-out cap drops
   *all* link edges from a hub doc (an INDEX.md linking to everything)
-  rather than truncating an arbitrary subset.
+  rather than truncating an arbitrary subset. When a seed pulls in more
+  link targets than the per-seed cap, the survivors are chosen by
+  relevance, not filename. Within a multi-section target, the specific
+  chunk returned is the one that best matches the task (`docs_fts`
+  relevance, OR-mode — a link exists precisely for targets that share
+  little vocabulary with the task, so an AND gate here would defeat the
+  tier's own purpose), not just the target's first section.
 - **Code references and symbols (V3/V4).** Backticked code filenames and
   fenced code snippets create directional `code_ref` edges to real source
   files. An inline-backticked symbol can refine a Python target to a def/class
   chunk and add bounded intra-file symbol neighbors. Every fan-out cap is
   skip-not-truncate. Python is AST-sliced; JS/TS/Go/Rust remain deliberate
-  whole-file references until language-specific parsers are added.
+  whole-file references until language-specific parsers are added. Both
+  which files win a fan-out cap and which chunk of a multi-chunk file gets
+  returned are ranked by relevance (`code_fts`, a dedicated FTS table over
+  code bodies) rather than by filename or document position, and the token
+  budget reserves a share for this tier so seed docs can't starve it to
+  zero before it's ever reached.
 - **Recursive chunking, not fixed-depth.** Long docs split at H2; any
   section still oversized with real substructure splits again at H3, then
   H4. Some repos have flat catalogs of H2 sections, others have one
