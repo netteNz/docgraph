@@ -5,9 +5,9 @@ Mirrors run_code_fixtures.py's shape exactly: a JSON case file, a
 standalone _check(case) runner, and (in test_retrieval_fixtures.py) a thin
 parametrized pytest wrapper.
 
-Both cases reconstruct real documented ordering failures (see
+Every case reconstructs a real documented ordering or budget failure (see
 docs/validation/RL_STOCKS_VALIDATION_NOTES.md) with a synthetic corpus, so
-neither needs the original repo. They score, not just pass/fail: _check
+none of them need the original repo. They score, not just pass/fail: _check
 returns the observed rank alongside the boolean, and main() prints a small
 table showing how much better (or worse) a change made ranking, not just
 whether it crossed a line.
@@ -34,30 +34,41 @@ def _code_ref_chunks(result: dict) -> list[dict]:
     return [c for c in result["chunks"] if c["provenance"] == "code_ref"]
 
 
+def _doc_body(case: dict) -> str:
+    """Case docs come inline via `doc_body`, or from a fixture file via
+    `doc_body_file` when they are too long to sit readably in JSON (the
+    budget-starvation case needs a doc over the 2000-token markdown split
+    threshold, or it indexes as a single seed and starves nothing)."""
+    if "doc_body_file" in case:
+        return (FIXTURES_DIR / case["doc_body_file"]).read_text(encoding="utf-8")
+    return case["doc_body"]
+
+
 def _check(case: dict) -> tuple[bool, str]:
     check = case["check"]
     expect = case["expect"]
 
-    if check == "rank_order":
-        if expect.get("requires_chunking"):
-            # Hard constraint (docs/RETRIEVAL_RANKING_PLAN.md): a fixture that
-            # collapses into one whole-file chunk passes vacuously without
-            # testing in-file ordering at all. Fail loudly instead if a
-            # future edit shrinks the fixture below the chunking threshold.
-            for source in case["sources"]:
-                body = (FIXTURES_DIR / source).read_text(encoding="utf-8")
-                if not is_chunking_candidate(body):
-                    return False, (
-                        f"{source} is no longer a chunking candidate — fixture "
-                        "no longer exercises in-file ordering"
-                    )
+    if expect.get("requires_chunking"):
+        # Hard constraint (docs/RETRIEVAL_RANKING_PLAN.md): a fixture that
+        # collapses into one whole-file chunk passes vacuously without
+        # testing in-file ordering at all. Fail loudly instead if a
+        # future edit shrinks the fixture below the chunking threshold.
+        for source in case["sources"]:
+            body = (FIXTURES_DIR / source).read_text(encoding="utf-8")
+            if not is_chunking_candidate(body):
+                return False, (
+                    f"{source} is no longer a chunking candidate — fixture "
+                    "no longer exercises in-file ordering"
+                )
 
-        repo_root, db_path = _temp_index(
-            sources=case["sources"], doc_body=case["doc_body"], fixtures_dir=FIXTURES_DIR,
-        )
-        try:
-            result = retrieve(repo_root, db_path, case["task"], max_tokens=case["max_tokens"])
-            code_chunks = _code_ref_chunks(result)
+    repo_root, db_path = _temp_index(
+        sources=case["sources"], doc_body=_doc_body(case), fixtures_dir=FIXTURES_DIR,
+    )
+    try:
+        result = retrieve(repo_root, db_path, case["task"], max_tokens=case["max_tokens"])
+        code_chunks = _code_ref_chunks(result)
+
+        if check == "rank_order":
             headings = [c["heading"] for c in code_chunks]
             before, after = expect["before"], expect["after"]
             if before not in headings:
@@ -72,25 +83,48 @@ def _check(case: dict) -> tuple[bool, str]:
                     f"{after!r} (rank {rank_after})"
                 )
             return True, f"{before!r} (rank {rank_before}) outranks {after!r} (rank {rank_after})"
-        finally:
-            shutil.rmtree(repo_root, ignore_errors=True)
 
-    if check == "target_selected":
-        repo_root, db_path = _temp_index(
-            sources=case["sources"], doc_body=case["doc_body"], fixtures_dir=FIXTURES_DIR,
-        )
-        try:
-            result = retrieve(repo_root, db_path, case["task"], max_tokens=case["max_tokens"])
-            code_chunks = _code_ref_chunks(result)
+        if check == "target_selected":
             selected_paths = {c["path"] for c in code_chunks}
             target = expect["selected_path"]
             if target not in selected_paths:
                 return False, f"{target!r} not among selected code paths: {sorted(selected_paths)}"
             return True, f"{target!r} selected among {len(selected_paths)} code paths"
-        finally:
-            shutil.rmtree(repo_root, ignore_errors=True)
 
-    raise ValueError(f"unknown check type: {check!r}")
+        if check == "chunk_selected":
+            # Budget starvation: the chunk is correctly *ranked* (code_fts
+            # put it first in its tier) but the doc tier consumed the whole
+            # budget before the code tier was reached. Assert on selection,
+            # not on rank -- ranking already passes here and would hide the
+            # defect entirely.
+            heading = expect["heading"]
+            headings = [c["heading"] for c in code_chunks]
+            if heading in headings:
+                rank = next(c["rank"] for c in code_chunks if c["heading"] == heading)
+                return True, (
+                    f"{heading!r} selected (rank {rank}); "
+                    f"{len(code_chunks)} code chunks in {result['total_tokens']}/"
+                    f"{result['budget']} tokens"
+                )
+            cut = [
+                c for c in result["budget_cut"]
+                if c["provenance"] == "code_ref" and c["heading"] == heading
+            ]
+            seed_tokens = sum(
+                c["token_est"] for c in result["chunks"] if c["provenance"] == "seed"
+            )
+            why = (
+                f"budget-cut at rank {cut[0]['rank']} ({cut[0]['token_est']} tok)"
+                if cut else "not a candidate at all"
+            )
+            return False, (
+                f"{heading!r} {why}; {seed_tokens} of {result['budget']} tokens went to "
+                f"seeds, leaving {len(code_chunks)} code chunks: {headings}"
+            )
+
+        raise ValueError(f"unknown check type: {check!r}")
+    finally:
+        shutil.rmtree(repo_root, ignore_errors=True)
 
 
 def main() -> int:

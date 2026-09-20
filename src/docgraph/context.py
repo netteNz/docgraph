@@ -188,6 +188,11 @@ _CODE_PATH_SCORE_SQL = (
 )
 _SYMBOL_NEIGHBORS_SQL = "SELECT target FROM edges WHERE source = ? AND kind = 'symbol'"
 MAX_CODE_NEIGHBORS_PER_SEED = 5
+CODE_TIER_BUDGET_SHARE = 0.3
+# Retrieve-time, tunable without reindexing. The fraction of max_tokens the
+# doc tiers may not spend, so the code tier is never starved to nothing by
+# seeds that outrank it. Capped at actual code demand at fill time, so it
+# costs a doc-only query nothing.
 MAX_SYMBOL_FANOUT = 5
 # Retrieve-time, tunable without reindexing (like MAX_CODE_NEIGHBORS_PER_SEED).
 # Skip-not-truncate: if a symbol-resolved chunk's one-hop expansion (preamble
@@ -373,15 +378,53 @@ def retrieve(
                     via[cc["id"]] = row["path"]
 
     ordered = sorted(ranked.items(), key=lambda kv: kv[1])
-    selected, running = [], 0
+
+    # Budget reservation for the code tier.
+    #
+    # Code chunks are ranked strictly below every doc tier (CODE_TIER_BASE
+    # is seed_limit*2), so a single greedy pass lets the doc tiers consume
+    # the entire budget before the code tier is reached at all. That is not
+    # hypothetical: with code_fts ranking landing the right chunk first in
+    # its tier, the fixture corpus at 1800 tokens spent 1791 on six seeds
+    # and cut `generate_rollback_guide` anyway -- correctly ranked, never
+    # selected. The greedy fill's `continue` then made it worse by
+    # admitting a smaller, lower-ranked chunk in the cut one's place.
+    #
+    # So fill in two passes: doc tiers against a reduced ceiling, then the
+    # code tier against the full budget (it inherits whatever the doc pass
+    # left unspent, so the reservation is a floor for code, not a cap).
+    #
+    # The reserve is capped at what the code tier can actually use, so a
+    # task with no code candidates reserves nothing and this is byte-for-
+    # byte today's behavior. That cap is what keeps this from taxing every
+    # doc-only query for a tier it isn't using.
+    code_ids = [cid for cid, _ in ordered if provenance[cid] == "code_ref"]
+    doc_ids = [cid for cid, _ in ordered if provenance[cid] != "code_ref"]
+    code_demand = sum(meta[cid]["token_est"] for cid in code_ids)
+    code_reserve = min(int(max_tokens * CODE_TIER_BUDGET_SHARE), code_demand)
+
     selected_ids: set[int] = set()
-    for chunk_id, _rank in ordered:
-        m = meta[chunk_id]
-        if running + m["token_est"] > max_tokens and selected:
-            continue
-        selected.append(m)
-        selected_ids.add(chunk_id)
-        running += m["token_est"]
+    running = 0
+
+    def _fill(candidate_ids: list[int], ceiling: int) -> None:
+        nonlocal running
+        for chunk_id in candidate_ids:
+            m = meta[chunk_id]
+            # `and selected_ids` preserves the original guarantee that the
+            # single highest-ranked candidate is admitted even when it alone
+            # blows the budget -- an empty pack is worse than an over-budget
+            # one. Only the globally-first candidate gets that exemption.
+            if running + m["token_est"] > ceiling and selected_ids:
+                continue
+            selected_ids.add(chunk_id)
+            running += m["token_est"]
+
+    _fill(doc_ids, max_tokens - code_reserve)
+    _fill(code_ids, max_tokens)
+
+    # Rebuilt from `ordered` rather than from fill order, so the pack stays
+    # in rank order exactly as the single-pass fill produced it.
+    selected = [meta[cid] for cid, _ in ordered if cid in selected_ids]
 
     # Counterfactual: candidates that scored into `ranked` but the budget
     # trim above didn't select -- this is what a link/code_ref/symbol tier
@@ -437,6 +480,7 @@ def retrieve(
         "task": task,
         "query_used": query_used,
         "budget": max_tokens,
+        "code_reserve": code_reserve,
         "total_tokens": running,
         "chunks": chunks,
         "budget_cut": budget_cut,

@@ -344,8 +344,58 @@ now correctly ranked 3rd) is **cut**, and the fill's `continue` then admits `con
 So relevance ordering is correct and the budget fill still hands the slot to the wrong chunk. The
 premise for leaving it alone ("the real problem was that the small chunk was *irrelevant*, which
 relevance ordering fixes at the source") is now falsified at realistic budgets: the small chunks
-winning slots are no longer the irrelevant ones, they are simply the ones that fit. This is the
-next change, and it should get its own harness case reproducing the 3000-token cut, red first.
+winning slots are no longer the irrelevant ones, they are simply the ones that fit.
+
+**Resolved by budget reservation** (next section).
+
+---
+
+## Part 3 — Reserve budget for the code tier
+
+Code chunks rank strictly below every doc tier (`CODE_TIER_BASE = seed_limit * 2`), so a single
+greedy pass lets seeds consume the whole budget before the code tier is reached. `code_fts` fixed
+*which* code chunk should win a slot; it could not create a slot to win.
+
+**The fix.** Fill in two passes instead of one. The doc tiers fill against
+`max_tokens - code_reserve`; the code tier then fills against the *full* `max_tokens`, inheriting
+whatever the doc pass left unspent. The reservation is therefore a floor for code, never a cap.
+
+`CODE_TIER_BUDGET_SHARE = 0.3`, retrieve-time tunable like `MAX_CODE_NEIGHBORS_PER_SEED`.
+
+**The reserve is capped at actual code demand** (`min(share * max_tokens, sum of code token_est)`).
+A task with no code candidates reserves nothing and gets byte-for-byte the old behavior. Without
+that cap, every doc-only query would pay a 30% tax for a tier it is not using — verified: a
+markdown-only corpus returns `code_reserve == 0`.
+
+Two invariants the two-pass fill preserves deliberately:
+
+- **The single-candidate exemption.** The original `and selected` guard admits the highest-ranked
+  candidate even when it alone exceeds the budget, because an empty pack is worse than an
+  over-budget one. Only the *globally* first candidate keeps that exemption.
+- **Rank order of the pack.** `selected` is rebuilt from `ordered`, not from fill order, so the
+  emitted pack is ordered exactly as the single-pass fill produced it.
+
+`code_reserve` is added to `retrieve()`'s result for observability. The query-log schema is
+untouched, so the `rank`-field concern noted under "Deferred" does not apply.
+
+### Measured
+
+New harness case `code_tier_budget_starvation` (synthetic, `rollback_runbook.md` + the existing
+`rollback_tools.py`), red on the parent commit and green after:
+
+| At `max_tokens=1800` | Before | After |
+|---|---|---|
+| Tokens spent on seeds | 1791 of 1800 | 1204 |
+| `generate_rollback_guide` (rank 20.0, 326 tok) | budget-cut | selected |
+| Code chunks in pack | 1 (a smaller, lower-ranked one) | 3 |
+
+The doc fixture must stay above the 2000-token markdown split threshold
+(`sections.CHUNKING_TOKEN_THRESHOLD`) or it indexes as a single seed and starves nothing — the
+same vacuous-pass trap as Case A's `requires_chunking` guard, which the case also sets.
+
+Real corpus, the veto-webapp case at `max_tokens=3000`: `TSDMachine > ban_slayer_map` is now
+**selected** at rank 3, where before it was correctly ranked and then cut. The trade is visible
+and intended — a 1782-token architecture seed is displaced by a 576-token one to make room.
 
 ## Follow-ups (not this change)
 

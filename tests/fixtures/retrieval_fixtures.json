@@ -1,7 +1,9 @@
 [
   {
     "name": "in_file_ordering_rollback",
-    "sources": ["rollback_tools.py"],
+    "sources": [
+      "rollback_tools.py"
+    ],
     "doc_body": "# Roll Back A Promoted Model\n\nSee `src/rollback_tools.py` for the rollback helpers.\n",
     "task": "how do I roll back a promoted model",
     "max_tokens": 800,
@@ -28,6 +30,20 @@
     "check": "target_selected",
     "expect": {
       "selected_path": "src/exit_manager.py"
+    }
+  },
+  {
+    "name": "code_tier_budget_starvation",
+    "sources": [
+      "rollback_tools.py"
+    ],
+    "doc_body_file": "rollback_runbook.md",
+    "task": "how do I roll back a promoted model",
+    "max_tokens": 1800,
+    "check": "chunk_selected",
+    "expect": {
+      "requires_chunking": true,
+      "heading": "generate_rollback_guide"
     }
   }
 ]
