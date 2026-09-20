@@ -2,6 +2,7 @@
 name = "docgraph"
 version = "0.1.0"
 requires-python = ">=3.10"
+license = "MIT"
 dependencies = [
     "python-frontmatter",
     "mcp<2.0",  # mcp 2.0 dropped mcp.server.fastmcp; mcp_server.py uses FastMCP
