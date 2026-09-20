@@ -42,6 +42,25 @@ def _source_hash(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
+def _require_schema(conn: sqlite3.Connection) -> None:
+    """Raise (not silently degrade) when an old index predates code_fts.
+
+    Retrieval on a `db/*.db` built before this table would otherwise hit
+    `sqlite3.OperationalError: no such table` partway through retrieve(), or
+    worse, only on the code_ref path — after _require_fresh_sources already
+    passed. Same rebuild-only contract as docs/INDEXING.md; every existing
+    caller already handles IndexStaleError.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='code_fts'"
+    ).fetchone()
+    if row is None:
+        raise IndexStaleError(
+            "index predates the code_fts relevance table; rebuild it with "
+            "`python -m docgraph.index <repo_root> <db_path>`"
+        )
+
+
 def _require_fresh_sources(conn: sqlite3.Connection, repo_root: Path) -> None:
     """Fail before ranking when indexed source content has changed or vanished.
 
@@ -142,8 +161,30 @@ _CODE_CHUNK_SQL = (
     "FROM chunks c WHERE c.path = ? AND c.heading IS ? ORDER BY c.id LIMIT 1"
 )
 _CODE_FILE_CHUNKS_SQL = (
-    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, NULL AS score "
-    "FROM chunks c WHERE c.path = ? ORDER BY c.id"
+    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, m.score AS score "
+    "FROM chunks c "
+    "LEFT JOIN (SELECT rowid AS rid, bm25(code_fts) AS score "
+    "           FROM code_fts WHERE code_fts MATCH ?) m ON m.rid = c.id "
+    "WHERE c.path = ? "
+    "ORDER BY (m.score IS NULL), m.score, c.id"
+)
+# LEFT JOIN, never a filter: the code_ref tier is deliberately unconditional
+# (a task sharing zero vocabulary with the code still gets the file back —
+# see test_filename_only_code_refs_are_labeled_for_validation). A `WHERE ...
+# MATCH` JOIN would silently drop every non-matching chunk instead of just
+# reordering them; bm25 is negative (lower = better) so non-matches sort
+# last via `(m.score IS NULL)`, and c.id keeps document order as the
+# same-score tiebreak, identical to today when nothing matches at all.
+_CODE_PATH_SCORE_SQL = (
+    "SELECT c.path AS path, MIN(m.score) AS score FROM chunks c "
+    "JOIN (SELECT rowid AS rid, bm25(code_fts) AS score "
+    "      FROM code_fts WHERE code_fts MATCH ? LIMIT -1) m ON m.rid = c.id "
+    # LIMIT -1 (a no-op on row count) stops SQLite's query planner from
+    # flattening this subquery into the outer GROUP BY -- flattened, bm25()
+    # loses the query context it needs and raises "unable to use function
+    # bm25 in the requested context". The plain per-row JOIN in
+    # _CODE_FILE_CHUNKS_SQL doesn't hit this; only the GROUP BY here does.
+    "GROUP BY c.path"
 )
 _SYMBOL_NEIGHBORS_SQL = "SELECT target FROM edges WHERE source = ? AND kind = 'symbol'"
 MAX_CODE_NEIGHBORS_PER_SEED = 5
@@ -181,6 +222,7 @@ def retrieve(
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
+        _require_schema(conn)
         _require_fresh_sources(conn, repo_root)
     except Exception:
         conn.close()
@@ -250,13 +292,36 @@ def retrieve(
     # Code neighbors are unconditional too, ranked strictly below the entire
     # link tier (which occupies [seed_limit, seed_limit*2)) regardless of
     # seed_limit's value.
+    #
+    # Query mode here is OR, unconditionally -- independent of query_used.
+    # AND over a full task string matches essentially zero code chunks (a
+    # 6-word task rarely appears verbatim in code), so every code_fts score
+    # would come back NULL and ordering would silently fall back to document
+    # order -- the exact defect this table exists to fix, restored
+    # invisibly. bm25's own IDF weighting already does the discrimination
+    # AND was standing in for. This is safe to diverge from the seeds
+    # because these bm25 values are never compared across tiers -- code
+    # chunks are placed by the positional CODE_TIER_BASE + i + j/100 + k/10000
+    # formula below, and bm25 only decides j and k within it.
+    code_query = _fts_query(words, "OR")
     CODE_TIER_BASE = seed_limit * 2
+    path_scores: dict[str, float | None] = {
+        r["path"]: r["score"] for r in conn.execute(_CODE_PATH_SCORE_SQL, (code_query,))
+    }
     for i, row in enumerate(seeds):
         code_targets = conn.execute(
-            "SELECT target FROM edges WHERE source = ? AND kind = 'code_ref' "
-            "ORDER BY target LIMIT ?",
-            (row["path"], MAX_CODE_NEIGHBORS_PER_SEED),
+            "SELECT target FROM edges WHERE source = ? AND kind = 'code_ref'",
+            (row["path"],),
         ).fetchall()
+        # Order by relevance (MIN bm25 per target file), not alphabetically,
+        # before the neighbor cap truncates it -- the cap now cuts by
+        # relevance instead of by filename. Unmatched files keep alphabetical
+        # order and stay last, identical to today when nothing matches.
+        def _target_sort_key(ct):
+            score = path_scores.get(split_code_key(ct["target"])[0])
+            return (score is None, score if score is not None else 0.0, ct["target"])
+
+        code_targets = sorted(code_targets, key=_target_sort_key)[:MAX_CODE_NEIGHBORS_PER_SEED]
         for j, ct in enumerate(code_targets):
             code_path, heading = split_code_key(ct["target"])
             if code_path in seed_paths:
@@ -287,16 +352,16 @@ def retrieve(
                 if len(group) > MAX_SYMBOL_FANOUT:
                     group = [
                         (chunk, "symbol_fallback")
-                        for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+                        for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_query, code_path)).fetchall()
                     ]
             else:
-                # Filename-only: preamble + every chunk in the file, in
-                # document order, budget-trimmed downstream same as V3's
-                # whole-file inclusion — just now cut at def boundaries
-                # instead of mid-function.
+                # Filename-only: preamble + every chunk in the file, ordered
+                # by code_fts relevance (bm25, non-matches last, c.id as
+                # tiebreak) instead of raw document order, budget-trimmed
+                # downstream same as V3's whole-file inclusion.
                 group = [
                     (chunk, "filename")
-                    for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_path,)).fetchall()
+                    for chunk in conn.execute(_CODE_FILE_CHUNKS_SQL, (code_query, code_path)).fetchall()
                 ]
 
             for k, (cc, detail) in enumerate(group):

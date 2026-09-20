@@ -14,6 +14,14 @@ covered" below.** An earlier version of this document reported exposure
 rates as if they were usefulness rates; that was wrong and is corrected
 here. See "Corrections from the first pass" for what changed and why.
 
+**Every number below was measured under document-order code ranking.**
+docs/RETRIEVAL_RANKING_PLAN.md replaced that with `code_fts`-ranked ordering
+(in-file and cross-file), which changes what wins a token-budget slot in
+the code tier. These numbers must be **re-run, not compared against** as a
+baseline for that change — a fix that improves code-tier selection will not
+show up against these figures because the selection mechanism they measured
+no longer exists.
+
 ## Reproducing
 
 ```bash

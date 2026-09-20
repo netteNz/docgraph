@@ -292,9 +292,12 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
     # that keeps code out of FTS seeding/co-location matching entirely
     # (_SEED_SQL/_NEIGHBOR_SQL both join through docs_fts, so a code chunk
     # with no FTS row is structurally unreachable except via the code_ref
-    # edge). Code files skip the generic dedup/co-location pipeline entirely
-    # — a fully separate insertion path so this can't destabilize the
-    # existing markdown pipeline.
+    # edge). Code chunks instead get a row in the separate code_fts table —
+    # a relevance signal used only to ORDER code_ref/code-neighbor results
+    # once they're already reachable, never to seed or gate them. Code files
+    # skip the generic dedup/co-location pipeline entirely — a fully
+    # separate insertion path so this can't destabilize the existing
+    # markdown pipeline.
     known_code_paths = _discover_code_files(repo_root)
     doc_paths = {r["path"] for r in rows}
 
@@ -379,9 +382,23 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
             # code_chunks.py's "Class > method" heading shape) — same two
             # separators, same meaning, in both pipelines.
             indexed_title = filename if c.heading is None else f"{filename} § {c.heading}"
-            conn.execute(
+            cc = conn.execute(
                 "INSERT INTO chunks(doc_id,path,heading,indexed_title,token_est) VALUES(?,?,?,?,?)",
                 (doc_id, code_path, c.heading, indexed_title, c.token_est),
+            )
+            # Narrower fts_title rule mirrors _insert's docs_fts convention
+            # (:169): the chunk's own heading only, filename for the
+            # preamble. The filename is constant across every chunk of a
+            # file, so putting it in every row's title would add an
+            # identical term to every in-file score, flattening exactly the
+            # ranking this table exists to provide — and a code task usually
+            # *does* mention the filename (that's why the code_ref edge
+            # exists), so it would match every chunk equally and collapse
+            # back to document order through the tiebreak.
+            fts_title = c.heading if c.heading is not None else filename
+            conn.execute(
+                "INSERT INTO code_fts(rowid,indexed_title,body) VALUES(?,?,?)",
+                (cc.lastrowid, fts_title, c.text),
             )
         inserted[code_path] = doc_id
 
@@ -443,6 +460,7 @@ DROP TABLE IF EXISTS docs;
 DROP TABLE IF EXISTS chunks;
 DROP TABLE IF EXISTS edges;
 DROP TABLE IF EXISTS docs_fts;
+DROP TABLE IF EXISTS code_fts;
 """
 
 SCHEMA = """
@@ -475,6 +493,9 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
     indexed_title, body,
     content='', tokenize='porter'
+);
+CREATE VIRTUAL TABLE IF NOT EXISTS code_fts USING fts5(
+    indexed_title, body, content='', tokenize='porter'
 );
 """
 

@@ -1,0 +1,33 @@
+[
+  {
+    "name": "in_file_ordering_rollback",
+    "sources": ["rollback_tools.py"],
+    "doc_body": "# Roll Back A Promoted Model\n\nSee `src/rollback_tools.py` for the rollback helpers.\n",
+    "task": "how do I roll back a promoted model",
+    "max_tokens": 800,
+    "check": "rank_order",
+    "expect": {
+      "requires_chunking": true,
+      "before": "generate_rollback_guide",
+      "after": "utc_now"
+    }
+  },
+  {
+    "name": "cross_file_target_ordering_exit_manager",
+    "sources": [
+      "aaa_util_0.py",
+      "aaa_util_1.py",
+      "aaa_util_2.py",
+      "aaa_util_3.py",
+      "aaa_util_4.py",
+      "exit_manager.py"
+    ],
+    "doc_body": "# Position Exit Handling\n\nPosition exit and stop-loss logic references: `src/aaa_util_0.py` `src/aaa_util_1.py` `src/aaa_util_2.py` `src/aaa_util_3.py` `src/aaa_util_4.py` `src/exit_manager.py`\n",
+    "task": "how does the position exit and stop loss logic work",
+    "max_tokens": 100000,
+    "check": "target_selected",
+    "expect": {
+      "selected_path": "src/exit_manager.py"
+    }
+  }
+]

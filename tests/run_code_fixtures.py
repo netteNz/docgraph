@@ -44,20 +44,38 @@ def _participants(source_file: str) -> dict[str, set[str]]:
     return participants
 
 
-def _temp_index(source_file: str, mention_lines: list[str]) -> tuple[Path, Path]:
-    """Build a disposable temp repo containing one fixture .py file plus a
-    small doc that filename- and symbol-references it, then index it.
-    Returns (repo_root, db_path); caller is responsible for cleanup."""
+def _temp_index(
+    source_file: str | None = None,
+    mention_lines: list[str] | None = None,
+    *,
+    sources: list[str] | None = None,
+    doc_body: str | None = None,
+    fixtures_dir: Path | None = None,
+) -> tuple[Path, Path]:
+    """Build a disposable temp repo containing fixture .py file(s) plus a
+    doc that references them, then index it. Returns (repo_root, db_path);
+    caller is responsible for cleanup.
+
+    Single-file signature (source_file, mention_lines) is unchanged for
+    run_code_fixtures.py's existing callers. Pass `sources` (a list of
+    filenames) and/or `doc_body` to build a multi-file repo with a custom
+    doc, as run_retrieval_fixtures.py's cases need.
+    """
+    fixtures_dir = fixtures_dir or FIXTURES_DIR
     tmp_dir = Path(tempfile.mkdtemp(prefix="docgraph_code_fixture_"))
     src_dir = tmp_dir / "src"
     src_dir.mkdir()
-    shutil.copy(FIXTURES_DIR / source_file, src_dir / source_file)
-    doc = tmp_dir / "DOC.md"
-    doc.write_text(
-        "# Fixture doc\n\n"
-        f"See `src/{source_file}`.\n\n" + "\n".join(mention_lines) + "\n",
-        encoding="utf-8",
-    )
+
+    for sf in (sources if sources is not None else [source_file]):
+        shutil.copy(fixtures_dir / sf, src_dir / sf)
+
+    if doc_body is None:
+        doc_body = (
+            "# Fixture doc\n\n"
+            f"See `src/{source_file}`.\n\n" + "\n".join(mention_lines or []) + "\n"
+        )
+    (tmp_dir / "DOC.md").write_text(doc_body, encoding="utf-8")
+
     db_path = tmp_dir / "fixture.db"
     index_build(tmp_dir, db_path)
     return tmp_dir, db_path

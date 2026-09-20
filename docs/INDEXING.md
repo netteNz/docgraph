@@ -14,3 +14,7 @@ chunk or whole-file fallback.
 
 Keep query logs and generated context packs outside indexed repositories so
 they do not become retrievable source material after a rebuild.
+
+`code_fts` stores a term index over code bodies (used only to rank code_ref
+results, never to seed or gate them), so a code-heavy repo's `.db` grows
+noticeably.
