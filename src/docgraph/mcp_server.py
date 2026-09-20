@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from .context import build_pack
 
@@ -27,7 +28,20 @@ _REPO_ROOT: Path
 _DB_PATH: Path
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        # Only queries the local SQLite index and re-reads files from the
+        # indexed repo on disk (context.py's retrieve/build_pack never
+        # write). Deterministic for a fixed index + args, so repeat calls
+        # are idempotent. Everything it touches is local and closed —
+        # repo_root/db_path bound at server startup, no network or
+        # unbounded external state — so openWorldHint is false.
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 def docgraph_context(task: str, max_tokens: int = 8000) -> str:
     """
     Retrieve a token-budgeted markdown context pack relevant to a task,
