@@ -174,6 +174,21 @@ _LINK_SQL = (
     "WHERE c.path = ? "
     "ORDER BY (m.score IS NULL), m.score, c.id LIMIT 1"
 )
+# Per-path best score, mirroring _CODE_PATH_SCORE_SQL -- sorts link targets
+# by relevance before MAX_LINK_NEIGHBORS_PER_SEED truncates, so the cap
+# cuts by relevance instead of by filename. LIMIT -1 is the same
+# anti-flattening guard _CODE_PATH_SCORE_SQL needs: without it, SQLite's
+# query planner flattens this subquery into the outer GROUP BY and bm25()
+# loses the query context it needs, raising "unable to use function bm25
+# in the requested context". Unlike the code tier's version, this table
+# has no #symbol suffix to strip -- link targets are always plain doc
+# paths -- so no split_code_key equivalent is needed on the result.
+_LINK_PATH_SCORE_SQL = (
+    "SELECT c.path AS path, MIN(m.score) AS score FROM chunks c "
+    "JOIN (SELECT rowid AS rid, bm25(docs_fts) AS score "
+    "      FROM docs_fts WHERE docs_fts MATCH ? LIMIT -1) m ON m.rid = c.id "
+    "GROUP BY c.path"
+)
 MAX_LINK_NEIGHBORS_PER_SEED = 5
 # Retrieve-time cap, independent of index.py's MAX_LINK_FANOUT: that one
 # bounds what a hub doc contributes to the edges table at index time; this
@@ -342,12 +357,23 @@ def retrieve(
     # ordered within that tier by the originating seed's rank. _LINK_SQL's
     # own comment above explains why its query mode is OR, unconditionally.
     link_query = _fts_query(words, "OR")
+    link_path_scores: dict[str, float | None] = {
+        r["path"]: r["score"] for r in conn.execute(_LINK_PATH_SCORE_SQL, (link_query,))
+    }
     for i, row in enumerate(seeds):
         link_targets = conn.execute(
-            "SELECT target FROM edges WHERE source = ? AND kind = 'link' "
-            "ORDER BY target LIMIT ?",
-            (row["path"], MAX_LINK_NEIGHBORS_PER_SEED),
+            "SELECT target FROM edges WHERE source = ? AND kind = 'link'",
+            (row["path"],),
         ).fetchall()
+        # Order by relevance (MIN bm25 per target path), not alphabetically,
+        # before the neighbor cap truncates it -- mirrors the code tier's
+        # _target_sort_key. Unmatched targets keep alphabetical order and
+        # stay last, identical to today when nothing matches.
+        def _link_target_sort_key(lt):
+            score = link_path_scores.get(lt["target"])
+            return (score is None, score if score is not None else 0.0, lt["target"])
+
+        link_targets = sorted(link_targets, key=_link_target_sort_key)[:MAX_LINK_NEIGHBORS_PER_SEED]
         for j, lt in enumerate(link_targets):
             if lt["target"] in seed_paths:
                 continue

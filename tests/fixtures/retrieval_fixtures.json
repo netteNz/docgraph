@@ -63,5 +63,25 @@
       "via": "DOC.md",
       "heading": "Rolling Back A Promoted Model"
     }
+  },
+  {
+    "name": "link_target_cap_by_relevance",
+    "sources": [],
+    "doc_body": "# Operations Index\n\nHow do you roll back a promoted model? See the procedures linked below.\n\n- [cap_target_aardvark.md](docs/cap_target_aardvark.md)\n- [cap_target_bison.md](docs/cap_target_bison.md)\n- [cap_target_camel.md](docs/cap_target_camel.md)\n- [cap_target_dingo.md](docs/cap_target_dingo.md)\n- [cap_target_egret.md](docs/cap_target_egret.md)\n- [cap_target_falcon.md](docs/cap_target_falcon.md)\n- [cap_target_zebra_promoted_model_rollback.md](docs/cap_target_zebra_promoted_model_rollback.md)\n",
+    "extra_docs": {
+      "docs/cap_target_aardvark.md": "cap_target_aardvark.md",
+      "docs/cap_target_bison.md": "cap_target_bison.md",
+      "docs/cap_target_camel.md": "cap_target_camel.md",
+      "docs/cap_target_dingo.md": "cap_target_dingo.md",
+      "docs/cap_target_egret.md": "cap_target_egret.md",
+      "docs/cap_target_falcon.md": "cap_target_falcon.md",
+      "docs/cap_target_zebra_promoted_model_rollback.md": "cap_target_zebra_promoted_model_rollback.md"
+    },
+    "task": "how do I roll back a promoted model",
+    "max_tokens": 100000,
+    "check": "link_target_survives_cap",
+    "expect": {
+      "path": "docs/cap_target_zebra_promoted_model_rollback.md"
+    }
   }
 ]

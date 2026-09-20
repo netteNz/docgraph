@@ -184,6 +184,17 @@ def _check(case: dict) -> tuple[bool, str]:
                 f"(query_used={result['query_used']!r})"
             )
 
+        if check == "link_target_survives_cap":
+            # Membership, not ordering: does the on-topic target survive
+            # MAX_LINK_NEIGHBORS_PER_SEED truncation at all. Distinct from
+            # link_chunk_selected, which assumes the target is already in
+            # the pack and asks only which of its chunks won.
+            path = expect["path"]
+            link_paths = sorted({c["path"] for c in _link_chunks(result)})
+            if path in link_paths:
+                return True, f"{path!r} survived the cap; link paths: {link_paths}"
+            return False, f"{path!r} cut by the cap; link paths present: {link_paths}"
+
         raise ValueError(f"unknown check type: {check!r}")
     finally:
         shutil.rmtree(repo_root, ignore_errors=True)

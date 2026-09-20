@@ -510,14 +510,40 @@ dict reference the field).
 
 Full suite: **29 passed, 7 skipped** (one new fixture case; no regressions).
 
-## Part 6 — Cut link targets by relevance, not alphabetically (planned)
+## Part 6 — Cut link targets by relevance, not alphabetically
 
-`context.py`'s link edge query still does `ORDER BY target LIMIT ?`, the same alphabetical-cap
-defect Part 2 fixed for the code tier. Not landed in Part 5 because it is a **membership** change —
-which targets appear at all, not merely which chunk of an already-included one wins — and the only
-tests that can see link-tier membership regressions (`test_external_link_fixtures.py`) skip on this
-machine. Bundling it with Part 5's pure reorder would make a real regression unbisectable. See
-Follow-ups.
+`context.py`'s link edge query did `ORDER BY target LIMIT ?`, the same alphabetical-cap defect
+Part 2 fixed for the code tier. Not landed in Part 5 because it is a **membership** change — which
+targets appear at all, not merely which chunk of an already-included one wins — and the only tests
+that can see link-tier membership regressions (`test_external_link_fixtures.py`) skip on this
+machine. Bundling it with Part 5's pure reorder would have made a real regression unbisectable.
+
+### The change
+
+Mirrors the code tier's `_target_sort_key`/`_CODE_PATH_SCORE_SQL` exactly: a new
+`_LINK_PATH_SCORE_SQL` (per-path `MIN(bm25(docs_fts))`, with the same `LIMIT -1` anti-flattening
+guard `_CODE_PATH_SCORE_SQL` needs against the query planner stripping `bm25()`'s context under a
+`GROUP BY`) is evaluated once per `retrieve()` call, before the seed loop. Inside the loop,
+`ORDER BY target LIMIT ?` is dropped — all of a seed's link targets are fetched, sorted by
+`(score is None, score, target)`, then sliced to `MAX_LINK_NEIGHBORS_PER_SEED`. Unlike the code
+tier's version, no `split_code_key` equivalent is needed: link targets are always plain doc paths,
+never `path#symbol`.
+
+### Measured
+
+New harness case `link_target_cap_by_relevance`: a source doc with 7 link targets (`>
+MAX_LINK_NEIGHBORS_PER_SEED = 5` to exercise the cap, `<= MAX_LINK_FANOUT = 10` so index-time
+fanout doesn't drop the source doc's edges entirely) — 6 lexically off-topic targets named
+alphabetically first (`aardvark`, `bison`, `camel`, `dingo`, `egret`, `falcon`) and one on-topic
+target (`zebra_promoted_model_rollback`) sorting alphabetically **last**. Red on the parent commit,
+green after:
+
+| | Before | After |
+|---|---|---|
+| Link chunks selected | `aardvark, bison, camel, dingo, egret` (alphabetical, first 5) | `aardvark, bison, camel, dingo, zebra_promoted_model_rollback` (relevance-sorted, top 5) |
+| On-topic target present | No — cut entirely by the cap | Yes |
+
+Full suite: **30 passed, 7 skipped** (one new fixture case; no regressions).
 
 ## Follow-ups (not this change)
 
@@ -532,12 +558,6 @@ Follow-ups.
   entirely rather than raising its threshold. Blocked on `rank`'s float type in the `_log_query`
   JSONL schema and the `/context` HTTP payload — needs a schema migration, not just a formula
   change.
-- **The link tier's alphabetical target cap** (Part 6, not yet landed) — mirror
-  `_target_sort_key`/`_CODE_PATH_SCORE_SQL`'s `LIMIT -1` anti-flattening guard for a
-  `_LINK_PATH_SCORE_SQL`, drop `ORDER BY target LIMIT ?`, sort all targets by
-  `(score is None, score, target)` before slicing to `MAX_LINK_NEIGHBORS_PER_SEED`. Needs a fixture
-  with 6–10 resolvable link targets (index-time `MAX_LINK_FANOUT = 10` drops a hub doc's edges
-  entirely above 10) with the on-topic one sorting alphabetically last.
 - **`tier_detail` is never set for link chunks**; `validation.py` special-cases the absence.
   Populating it changes what the validation report groups on — a separate change with its own
   measurement.
