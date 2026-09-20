@@ -3,7 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from docgraph.context import IndexStaleError, retrieve
+from docgraph.context import (
+    CODE_TIER_CHUNK_STEP,
+    MAX_CODE_NEIGHBORS_PER_SEED,
+    IndexStaleError,
+    _code_tier_rank,
+    retrieve,
+)
 from docgraph.index import build
 from docgraph.serve import SERVE_TEMPLATE
 import docgraph.index as index_module
@@ -95,3 +101,14 @@ def test_oversized_code_reference_hub_is_skipped_entirely(tmp_path):
 def test_live_viewer_sanitizes_marked_output():
     assert "DOMPurify.sanitize(rendered)" in SERVE_TEMPLATE
     assert "<script src=\"https://cdnjs.cloudflare.com/ajax/libs/dompurify/" in SERVE_TEMPLATE
+
+
+def test_code_tier_rank_nests_at_the_chunk_cap():
+    # The k term must stay strictly below the j step of 1/100, or chunk k
+    # of one target ties chunk 0 of the next and the tiers interleave.
+    # Reads CODE_TIER_CHUNK_STEP and MAX_CODE_NEIGHBORS_PER_SEED rather
+    # than restating the formula, so this goes red if either constant
+    # moves past what the current denominator can support.
+    last_k = CODE_TIER_CHUNK_STEP // 100 - 1
+    assert _code_tier_rank(20, 0, 0, last_k) < _code_tier_rank(20, 0, 1, 0)
+    assert _code_tier_rank(20, 0, MAX_CODE_NEIGHBORS_PER_SEED - 1, last_k) < _code_tier_rank(20, 1, 0, 0)

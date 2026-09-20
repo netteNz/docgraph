@@ -188,6 +188,37 @@ _CODE_PATH_SCORE_SQL = (
 )
 _SYMBOL_NEIGHBORS_SQL = "SELECT target FROM edges WHERE source = ? AND kind = 'symbol'"
 MAX_CODE_NEIGHBORS_PER_SEED = 5
+CODE_TIER_CHUNK_STEP = 1_000_000
+# The in-file chunk position `k` divides by this; the target position `j`
+# divides by 100 and the seed position `i` steps by 1, so the three terms
+# only nest correctly while k < CODE_TIER_CHUNK_STEP / 100 -- past that,
+# chunk k of target j ties chunk 0 of target j+1 and the two files'
+# chunks interleave. Not a float-precision question: ulp() at these
+# magnitudes (~3.6e-15 near rank values of 20-40) leaves eight orders of
+# magnitude of slack even at a 1e-9 step. It is arithmetic, and the
+# constraint is k's step against j's step of 1/100.
+#
+# j is safe by construction (MAX_CODE_NEIGHBORS_PER_SEED = 5, so j <= 4).
+# k is NOT: the `filename` and `symbol_fallback` paths emit every chunk of
+# the file (_CODE_FILE_CHUNKS_SQL has no LIMIT, code_chunks.build_chunks
+# has no cap), so k is bounded only by the number of top-level defs in one
+# source file. At the previous denominator of 10_000 the threshold was 101
+# chunks, which code_fts ranking made reachable rather than theoretical: a
+# high-k on-topic chunk is now the expected outcome of a large file, not a
+# rarity. 1_000_000 moves the threshold to 10_001 chunks in one file.
+#
+# This raises the threshold; it does not remove it. The collision-free
+# formulation is a (base+i, j, k) tuple sort key, deferred because `rank`
+# is a float in the JSONL query-log schema (_log_query) and rides the
+# /context HTTP payload (serve.py, transitively -- the whole retrieve()
+# dict is serialized, so there's no declaration site to grep). Failure
+# mode is ties, not exceptions -- sorted() is stable, so the pack degrades
+# gracefully and what actually breaks is the claim that `rank` encodes
+# tier position.
+
+
+def _code_tier_rank(base: int, i: int, j: int, k: int) -> float:
+    return base + i + j / 100.0 + k / CODE_TIER_CHUNK_STEP
 CODE_TIER_BUDGET_SHARE = 0.3
 # Retrieve-time, tunable without reindexing. The fraction of max_tokens the
 # doc tiers may not spend, so the code tier is never starved to nothing by
@@ -306,7 +337,7 @@ def retrieve(
     # invisibly. bm25's own IDF weighting already does the discrimination
     # AND was standing in for. This is safe to diverge from the seeds
     # because these bm25 values are never compared across tiers -- code
-    # chunks are placed by the positional CODE_TIER_BASE + i + j/100 + k/10000
+    # chunks are placed by the positional _code_tier_rank(CODE_TIER_BASE, i, j, k)
     # formula below, and bm25 only decides j and k within it.
     code_query = _fts_query(words, "OR")
     CODE_TIER_BASE = seed_limit * 2
@@ -371,7 +402,7 @@ def retrieve(
 
             for k, (cc, detail) in enumerate(group):
                 if cc["id"] not in ranked:
-                    ranked[cc["id"]] = CODE_TIER_BASE + i + j / 100.0 + k / 10000.0
+                    ranked[cc["id"]] = _code_tier_rank(CODE_TIER_BASE, i, j, k)
                     meta[cc["id"]] = cc
                     provenance[cc["id"]] = "code_ref"
                     tier_detail[cc["id"]] = detail

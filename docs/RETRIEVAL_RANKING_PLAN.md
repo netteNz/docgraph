@@ -397,6 +397,45 @@ Real corpus, the veto-webapp case at `max_tokens=3000`: `TSDMachine > ban_slayer
 **selected** at rank 3, where before it was correctly ranked and then cut. The trade is visible
 and intended — a 1782-token architecture seed is displaced by a 576-token one to make room.
 
+## Part 4 — Widen the code-tier chunk step (rank-collision defect)
+
+The rank-collision item under "Deferred to a separate commit" above is a **threshold raise, not a
+fix**. `context.py`'s code tier ranks a chunk at `CODE_TIER_BASE + i + j/100 + k/CODE_TIER_CHUNK_STEP`
+(now factored into `_code_tier_rank`); the three terms only nest correctly while `k`'s step stays
+strictly under `j`'s step of `1/100`. `k` is unbounded — the `filename` and `symbol_fallback` paths
+emit every chunk of a file with no cap — so a large enough file still collides.
+
+Landed: `CODE_TIER_CHUNK_STEP = 1_000_000`, replacing the previous implicit `10_000`. The collision
+boundary moves from 101 chunks in one file to 10,001. That is not a float-precision constraint —
+`ulp(20.0) ≈ 3.6e-15`, so even a `1e-9` step keeps 200,000 distinct k-values apart — it is purely
+arithmetic (`k < CODE_TIER_CHUNK_STEP / 100`), and the comment at the constant's definition records
+that rather than a precision claim.
+
+**Still deferred, correctly this time:** a `(base+i, j, k)` tuple sort key removes the collision
+entirely rather than raising its threshold, but `rank` is a float in the `_log_query` JSONL schema
+and rides the `/context` HTTP payload transitively through `serve.py` (the whole `retrieve()` dict
+is serialized — there is no single declaration site for the field). Moved to Follow-ups below.
+
+### Measured
+
+No corpus exercises 100+ chunks in one file, so this is verified by direct arithmetic rather than
+a synthetic fixture (a fixture clearing the chunking floor at 101 defs would be ~300 lines of
+padding testing three divisions — not a good trade, and exactly what `requires_chunking` guards
+exist to discourage). `tests/test_index_and_retrieval.py::test_code_tier_rank_nests_at_the_chunk_cap`
+asserts the nesting invariant at the real constants' boundary (`k = CODE_TIER_CHUNK_STEP//100 - 1`)
+and fails against the old `10_000`, satisfying red-first without a synthetic corpus.
+
+Consumers audited: `sorted()` at the tier-merge step is the only behavioral reader (stable sort,
+monotone key — order unaffected for every `k` under the old threshold, changed only for the
+`k >= 100` cases that were already broken). `_log_query`'s schema (field name, type) is unchanged.
+`validation.py`, `visualize.py`, `mcp_server.py` have no reference to `rank`. No test asserts an
+absolute rank value.
+
+Full suite: **28 passed, 7 skipped** (one new unit test; no regressions).
+
+This commit does **not** unblock Part 5 below — `k` exists only in the code tier's formula; the
+link tier's rank has no `k` term and this change leaves it untouched.
+
 ## Follow-ups (not this change)
 
 - Every number in `RL_STOCKS_VALIDATION_NOTES.md` was measured under document order. After this
@@ -406,3 +445,12 @@ and intended — a 1782-token architecture seed is displaced by a 576-token one 
   annotations somewhere the gitignore allows — otherwise the next fix is unverifiable for exactly
   the reason this one nearly was.
 - Re-measure the symbol tier post-fix and settle keep-vs-remove on real numbers.
+- **Tuple-keyed rank** (`(base+i, j, k)` instead of a single float) removes the k/j collision
+  entirely rather than raising its threshold. Blocked on `rank`'s float type in the `_log_query`
+  JSONL schema and the `/context` HTTP payload — needs a schema migration, not just a formula
+  change.
+- **The link tier's alphabetical target cap** (`context.py`, `ORDER BY target LIMIT ?` in the link
+  edge query) is the same defect Part 2 fixed for the code tier at `:322-329`. Deferred to its own
+  commit (Part 6, planned) because it is a membership change — which targets appear at all — not a
+  reorder-within-target, and the only tests that can see link-tier membership
+  (`test_external_link_fixtures.py`) skip on this machine.
