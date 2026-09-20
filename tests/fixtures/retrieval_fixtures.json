@@ -45,5 +45,23 @@
       "requires_chunking": true,
       "heading": "generate_rollback_guide"
     }
+  },
+  {
+    "name": "link_target_relevant_chunk",
+    "sources": [],
+    "doc_body": "# Roll Back A Promoted Model\n\nHow do you roll back a promoted model? The promotion rollback procedure lives in the [Runbook](docs/rollback_link_target.md).\n",
+    "extra_docs": {
+      "docs/rollback_link_target.md": "rollback_link_target.md"
+    },
+    "task": "how do I roll back a promoted model",
+    "max_tokens": 100000,
+    "check": "link_chunk_selected",
+    "expect": {
+      "requires_doc_chunking": ["docs/rollback_link_target.md"],
+      "query_used": "AND",
+      "path": "docs/rollback_link_target.md",
+      "via": "DOC.md",
+      "heading": "Rolling Back A Promoted Model"
+    }
   }
 ]

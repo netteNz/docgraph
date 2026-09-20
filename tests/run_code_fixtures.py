@@ -51,6 +51,7 @@ def _temp_index(
     sources: list[str] | None = None,
     doc_body: str | None = None,
     fixtures_dir: Path | None = None,
+    extra_docs: dict[str, str] | None = None,
 ) -> tuple[Path, Path]:
     """Build a disposable temp repo containing fixture .py file(s) plus a
     doc that references them, then index it. Returns (repo_root, db_path);
@@ -60,6 +61,14 @@ def _temp_index(
     run_code_fixtures.py's existing callers. Pass `sources` (a list of
     filenames) and/or `doc_body` to build a multi-file repo with a custom
     doc, as run_retrieval_fixtures.py's cases need.
+
+    `extra_docs` (keyword-only) maps a repo-relative destination path to a
+    filename under `fixtures_dir`, for cases that need a second markdown
+    doc for DOC.md to link to -- e.g. a link-tier fixture. Placing a target
+    under a subdirectory (rather than at the repo root, alongside DOC.md)
+    keeps it out of DOC.md's colocation group, since paths that share a
+    parent get a colocation edge and DOC.md would otherwise be alone at
+    the root.
     """
     fixtures_dir = fixtures_dir or FIXTURES_DIR
     tmp_dir = Path(tempfile.mkdtemp(prefix="docgraph_code_fixture_"))
@@ -75,6 +84,11 @@ def _temp_index(
             f"See `src/{source_file}`.\n\n" + "\n".join(mention_lines or []) + "\n"
         )
     (tmp_dir / "DOC.md").write_text(doc_body, encoding="utf-8")
+
+    for dest, filename in (extra_docs or {}).items():
+        dest_path = tmp_dir / dest
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(fixtures_dir / filename, dest_path)
 
     db_path = tmp_dir / "fixture.db"
     index_build(tmp_dir, db_path)

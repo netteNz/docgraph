@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from docgraph.code_chunks import is_chunking_candidate  # noqa: E402
+from docgraph.sections import is_chunking_candidate as is_doc_chunking_candidate  # noqa: E402
 from docgraph.context import retrieve  # noqa: E402
 
 from run_code_fixtures import _temp_index  # noqa: E402
@@ -32,6 +33,10 @@ FIXTURES_PATH = Path(__file__).resolve().parent / "fixtures" / "retrieval_fixtur
 
 def _code_ref_chunks(result: dict) -> list[dict]:
     return [c for c in result["chunks"] if c["provenance"] == "code_ref"]
+
+
+def _link_chunks(result: dict) -> list[dict]:
+    return [c for c in result["chunks"] if c["provenance"] == "link"]
 
 
 def _doc_body(case: dict) -> str:
@@ -61,8 +66,25 @@ def _check(case: dict) -> tuple[bool, str]:
                     "no longer exercises in-file ordering"
                 )
 
+    if expect.get("requires_doc_chunking"):
+        # Same trap as requires_chunking, but for markdown link targets --
+        # sections.is_chunking_candidate (H2/H3 + token floor), not
+        # code_chunks.is_chunking_candidate (which additionally demands
+        # top-level defs and is wrong for a doc).
+        for dest in expect["requires_doc_chunking"]:
+            filename = case["extra_docs"][dest]
+            body = (FIXTURES_DIR / filename).read_text(encoding="utf-8")
+            if not is_doc_chunking_candidate(body):
+                return False, (
+                    f"{dest} is no longer a chunking candidate — fixture "
+                    "no longer exercises link-target chunk selection"
+                )
+
     repo_root, db_path = _temp_index(
-        sources=case["sources"], doc_body=_doc_body(case), fixtures_dir=FIXTURES_DIR,
+        sources=case["sources"],
+        doc_body=_doc_body(case),
+        fixtures_dir=FIXTURES_DIR,
+        extra_docs=case.get("extra_docs"),
     )
     try:
         result = retrieve(repo_root, db_path, case["task"], max_tokens=case["max_tokens"])
@@ -120,6 +142,46 @@ def _check(case: dict) -> tuple[bool, str]:
             return False, (
                 f"{heading!r} {why}; {seed_tokens} of {result['budget']} tokens went to "
                 f"seeds, leaving {len(code_chunks)} code chunks: {headings}"
+            )
+
+        if check == "link_chunk_selected":
+            # Which chunk of an already-included link target wins the one
+            # slot. Assert on the chunk *for that path* specifically, not
+            # merely that some link chunk exists -- a mode regression (AND
+            # instead of OR) and an ordering regression (still picking the
+            # first chunk) produce different wrong headings, and reporting
+            # query_used lets the two be told apart from the failure alone.
+            path = expect["path"]
+            link_chunks = _link_chunks(result)
+            by_path = [c for c in link_chunks if c["path"] == path]
+            if not by_path:
+                paths = sorted({c["path"] for c in link_chunks})
+                return False, (
+                    f"{path!r} not among link chunks (query_used={result['query_used']!r}); "
+                    f"link paths present: {paths}"
+                )
+            got = by_path[0]
+            expected_heading = expect["heading"]
+            expected_via = expect.get("via")
+            expected_mode = expect.get("query_used")
+            if expected_mode is not None and result["query_used"] != expected_mode:
+                return False, (
+                    f"query_used={result['query_used']!r}, expected {expected_mode!r} "
+                    f"(got heading {got['heading']!r} for {path!r})"
+                )
+            if expected_via is not None and got.get("via") != expected_via:
+                return False, (
+                    f"{path!r} link chunk came via {got.get('via')!r}, expected "
+                    f"{expected_via!r} (heading={got['heading']!r})"
+                )
+            if got["heading"] != expected_heading:
+                return False, (
+                    f"{path!r} link chunk heading={got['heading']!r}, expected "
+                    f"{expected_heading!r} (query_used={result['query_used']!r})"
+                )
+            return True, (
+                f"{path!r} link chunk heading={got['heading']!r} "
+                f"(query_used={result['query_used']!r})"
             )
 
         raise ValueError(f"unknown check type: {check!r}")

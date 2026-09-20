@@ -134,14 +134,45 @@ _NEIGHBOR_SQL = (
 # No FTS gate — unconditional inclusion is the entire point of a link edge
 # (V1's neighbor rule requires the SAME query bar every seed clears; a link
 # recovers exactly the case where a relevant target shares no vocabulary
-# with the task, so gating it on that vocabulary would defeat it). Takes
-# the target doc's first chunk (document order) as a deterministic proxy
-# for "where a reader following the link would land" — a known limitation
-# for long multi-chunk targets, since there's no query to disambiguate
-# which section is relevant when inclusion doesn't depend on one.
+# with the task, so gating it on that vocabulary would defeat it). The
+# LEFT JOIN orders, it never filters: a `WHERE ... MATCH` would drop
+# non-matching targets and turn this tier back into the gated one it
+# exists not to be.
+#
+# Supersedes the original rationale, which took the target's first chunk
+# in document order as a proxy for "where a reader following the link
+# would land." That was reasonable while inclusion carried no query — but
+# the proxy was wrong about its own premise. A reader following a link
+# does not read the target from the top; they scan for the part that
+# answers the question they followed it with. The task string IS that
+# question, and docs_fts has always had a row for every chunk of every
+# link target (_insert, index.py:146-176; rowid == chunks.id), so the
+# signal was available the whole time and simply was not consulted. bm25
+# is negative (lower = better); non-matches sort last via
+# (m.score IS NULL) and c.id breaks the tie, so a target matching nothing
+# still returns bit-for-bit the row the old `ORDER BY c.id LIMIT 1`
+# returned.
+#
+# Query mode is OR, unconditionally, and for a different reason than the
+# code tier's OR. AND does match prose, so "AND matches ~no code chunks"
+# does not transfer. The reason is this tier's premise: a link edge earns
+# its place on targets LEXICALLY DISJOINT from the task
+# (link_fixtures.json's organic cases sit at jaccard 0.10-0.33). AND
+# demands every task word in one chunk, so on exactly those targets every
+# score is NULL, ordering collapses to c.id, and the fix no-ops on the
+# cases that motivated it. OR costs nothing here because this is not an
+# admission decision -- the target is already in the pack and the only
+# question is which of its sections wins the one slot, so a generic
+# shared word scores about equally across siblings and IDF does the
+# discriminating. Mode tracks the seeds only in the neighbor tier
+# (see neighbor_query above), where it gates.
 _LINK_SQL = (
-    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, NULL AS score "
-    "FROM chunks c WHERE c.path = ? ORDER BY c.id LIMIT 1"
+    "SELECT c.id, c.path, c.indexed_title, c.token_est, c.heading, m.score AS score "
+    "FROM chunks c "
+    "LEFT JOIN (SELECT rowid AS rid, bm25(docs_fts) AS score "
+    "           FROM docs_fts WHERE docs_fts MATCH ?) m ON m.rid = c.id "
+    "WHERE c.path = ? "
+    "ORDER BY (m.score IS NULL), m.score, c.id LIMIT 1"
 )
 MAX_LINK_NEIGHBORS_PER_SEED = 5
 # Retrieve-time cap, independent of index.py's MAX_LINK_FANOUT: that one
@@ -308,7 +339,9 @@ def retrieve(
 
     # Link neighbors are unconditional (no FTS gate) — ranked strictly below
     # every seed and every co-location neighbor (seed_limit + i + j/100),
-    # ordered within that tier by the originating seed's rank.
+    # ordered within that tier by the originating seed's rank. _LINK_SQL's
+    # own comment above explains why its query mode is OR, unconditionally.
+    link_query = _fts_query(words, "OR")
     for i, row in enumerate(seeds):
         link_targets = conn.execute(
             "SELECT target FROM edges WHERE source = ? AND kind = 'link' "
@@ -318,7 +351,7 @@ def retrieve(
         for j, lt in enumerate(link_targets):
             if lt["target"] in seed_paths:
                 continue
-            lc = conn.execute(_LINK_SQL, (lt["target"],)).fetchone()
+            lc = conn.execute(_LINK_SQL, (link_query, lt["target"])).fetchone()
             if lc and lc["id"] not in ranked:
                 ranked[lc["id"]] = seed_limit + i + j / 100.0
                 meta[lc["id"]] = lc

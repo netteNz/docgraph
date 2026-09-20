@@ -239,11 +239,13 @@ repo's `.db` grows noticeably.
 - **The `_LINK_SQL` fix (`:123`).** Same class of defect, and links target markdown which already
   has `docs_fts` rows — but it contradicts the documented "first chunk = where a reader following
   the link would land" rationale at `:118-122`, which needs rewriting rather than overriding.
-  Bundling it also muddies attribution for the Case A repro. Do it after, on its own.
+  Bundling it also muddies attribution for the Case A repro. Do it after, on its own. **Landed —
+  see Part 5.**
 - **Rank-collision widening.** `k/10000` overflows the `j/100` step at ≥100 chunks in one file.
   Pre-existing, but this change makes a high-`k` on-topic chunk the *expected* case rather than a
   rarity, so a latent bug becomes reachable. Widen to `k/1_000_000`; switching `ranked` to tuple
   keys is cleaner but changes the `rank` field in the query-log schema, so it needs its own change.
+  **Landed — see Part 4.**
 
 ### Explicitly out of scope
 
@@ -436,6 +438,87 @@ Full suite: **28 passed, 7 skipped** (one new unit test; no regressions).
 This commit does **not** unblock Part 5 below — `k` exists only in the code tier's formula; the
 link tier's rank has no `k` term and this change leaves it untouched.
 
+## Part 5 — Order the link tier by relevance
+
+`_LINK_SQL` took the target's first chunk in document order (`ORDER BY c.id LIMIT 1`), a proxy for
+"where a reader following the link would land" adopted because inclusion carried no query to
+disambiguate a long multi-chunk target with. That query was available the whole time — every link
+target is markdown, and `docs_fts` has always had a row for every markdown chunk — it was simply not
+consulted.
+
+Landed: `_LINK_SQL` is now a `LEFT JOIN` against `bm25(docs_fts)`, structurally identical to
+`_CODE_FILE_CHUNKS_SQL`, ordered `(m.score IS NULL), m.score, c.id LIMIT 1`. Reorder-never-filter in
+its strongest form: when nothing in the target matches, every score is NULL and the `c.id` tiebreak
+returns bit-for-bit the row the old query returned — not just the same row set permuted, but the
+same row whenever no signal exists. No new table, no reindex, no `IndexStaleError` path.
+
+**Query mode is OR, unconditionally — for a different reason than the code tier's OR.** The code
+tier diverges to OR because AND over a task string matches ~zero code chunks. That argument does not
+transfer here; link targets are markdown prose and AND matches prose fine. The reason that does hold
+is this tier's own premise: a link edge earns its place on targets *lexically disjoint* from the task
+(`link_fixtures.json`'s organic cases sit at jaccard 0.10–0.33). AND demands every task word in one
+chunk, so on exactly those targets every score comes back NULL and the fix silently no-ops on the
+cases that motivated it. OR costs nothing here because this is not an admission decision — the target
+is already in the pack, and OR only decides which of its own sibling sections wins the slot, where a
+generic shared word scores about equally across all of them and bm25's IDF gives the weight to rare
+terms. The rationale comment at the query's definition records both halves of this, since the
+adjacent code-tier comment reaches the same conclusion by the opposite argument.
+
+The `_LINK_SQL` comment (superseding the retired one) is the definitive rationale; see
+`context.py`.
+
+### Measured
+
+New harness case `link_target_relevant_chunk` (synthetic: a short source doc linking to a
+10,600-char target with an off-topic first H2, an unrelated middle H2, and the on-topic H2 last),
+red on the parent commit and green after:
+
+| | Before | After |
+|---|---|---|
+| Link chunk heading selected | `None` (intro) | `"Rolling Back A Promoted Model"` |
+| `score` field | always `NULL` | real bm25 value |
+
+**AND-mode check** (evidence for the OR choice, not just the argument): with the fix's SQL in place
+but the query mode temporarily forced to AND, the case fails — `score` comes back `NULL` for every
+chunk of the target (no chunk matches all 6 task words) and selection silently falls back to
+`c.id`, reproducing the exact no-op the OR argument predicts. Confirmed directly by re-running the
+fixture under both modes.
+
+**Real corpus.** Reindexed this repo itself (10 files, 9 link edges). For the task "what is the
+fixture corpus requirement for testing," the link chunk from `docs/validation/RL_STOCKS_VALIDATION_NOTES.md`
+(a genuine 7-chunk doc) is selected via its intro (`score=-2.29`) — checked against all 7 chunks'
+individual bm25 scores directly and confirmed the intro is honestly the best match for that query,
+not a vacuous fallback. This repo's docs don't happen to contain a link target where the on-topic
+section is *not* the first chunk, so no non-intro example was available locally; the synthetic
+fixture is the definitive evidence for the reorder itself, and this run is evidence the scoring
+mechanism produces real (not always-first) results on real data.
+
+**Budget interaction.** The two tight-budget fixtures (`in_file_ordering_rollback` at 800 tokens,
+`code_tier_budget_starvation` at 1800) cannot be perturbed by this change: `rollback_runbook.md`
+contains zero `[` characters, so neither generates a link edge. That is a fact about the current
+fixtures, not a guarantee — the next person who adds a markdown link to a fixture doc has changed
+the budget arithmetic for that case, since link chunks compete in the doc-tier budget pass
+(`max_tokens - code_reserve`) and a differently-sized chunk can now win or lose that competition.
+
+`test_external_link_fixtures.py`'s 7 cases all skip on this machine (no external corpora); they
+were not runnable, and this change rests on the new synthetic case as its only regression guard,
+naming that gap rather than implying coverage that doesn't exist.
+
+`score` is no longer `NULL` for link chunks; no consumer branches on it (checked: only SQL aliases,
+`_CODE_PATH_SCORE_SQL`'s dict comprehension, `_target_sort_key`, and a pass-through in the result
+dict reference the field).
+
+Full suite: **29 passed, 7 skipped** (one new fixture case; no regressions).
+
+## Part 6 — Cut link targets by relevance, not alphabetically (planned)
+
+`context.py`'s link edge query still does `ORDER BY target LIMIT ?`, the same alphabetical-cap
+defect Part 2 fixed for the code tier. Not landed in Part 5 because it is a **membership** change —
+which targets appear at all, not merely which chunk of an already-included one wins — and the only
+tests that can see link-tier membership regressions (`test_external_link_fixtures.py`) skip on this
+machine. Bundling it with Part 5's pure reorder would make a real regression unbisectable. See
+Follow-ups.
+
 ## Follow-ups (not this change)
 
 - Every number in `RL_STOCKS_VALIDATION_NOTES.md` was measured under document order. After this
@@ -449,8 +532,12 @@ link tier's rank has no `k` term and this change leaves it untouched.
   entirely rather than raising its threshold. Blocked on `rank`'s float type in the `_log_query`
   JSONL schema and the `/context` HTTP payload — needs a schema migration, not just a formula
   change.
-- **The link tier's alphabetical target cap** (`context.py`, `ORDER BY target LIMIT ?` in the link
-  edge query) is the same defect Part 2 fixed for the code tier at `:322-329`. Deferred to its own
-  commit (Part 6, planned) because it is a membership change — which targets appear at all — not a
-  reorder-within-target, and the only tests that can see link-tier membership
-  (`test_external_link_fixtures.py`) skip on this machine.
+- **The link tier's alphabetical target cap** (Part 6, not yet landed) — mirror
+  `_target_sort_key`/`_CODE_PATH_SCORE_SQL`'s `LIMIT -1` anti-flattening guard for a
+  `_LINK_PATH_SCORE_SQL`, drop `ORDER BY target LIMIT ?`, sort all targets by
+  `(score is None, score, target)` before slicing to `MAX_LINK_NEIGHBORS_PER_SEED`. Needs a fixture
+  with 6–10 resolvable link targets (index-time `MAX_LINK_FANOUT = 10` drops a hub doc's edges
+  entirely above 10) with the on-topic one sorting alphabetically last.
+- **`tier_detail` is never set for link chunks**; `validation.py` special-cases the absence.
+  Populating it changes what the validation report groups on — a separate change with its own
+  measurement.
