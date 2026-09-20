@@ -4,7 +4,7 @@
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](pyproject.toml)
 [![MCP](https://img.shields.io/badge/protocol-MCP-5A67D8)](https://modelcontextprotocol.io)
 [![SQLite FTS5](https://img.shields.io/badge/index-SQLite%20FTS5-003B57)](docs)
-[![License](https://img.shields.io/badge/license-none%20specified-lightgrey)](#license)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 Repo-native markdown context broker — an MCP tool that gives coding agents
 task-relevant docs instead of dumping `docs/**`.
@@ -207,4 +207,4 @@ mode, cross-repo search.
 
 ## License
 
-Personal project, no license specified.
+[MIT](LICENSE)
