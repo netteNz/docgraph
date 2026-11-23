@@ -16,7 +16,7 @@ def _excluded(path: Path, root: Path) -> bool:
     return any(part in DEFAULT_EXCLUDES for part in path.relative_to(root).parts)
 
 
-def discover(root: Path, exclude_buckets: set[str]) -> list[tuple[Path, str]]:
+def discover(root: Path, exclude_buckets: set[str], include_all: bool = False) -> list[tuple[Path, str]]:
     found: dict[Path, str] = {}
     if "root" not in exclude_buckets:
         for p in root.glob("*.md"):
@@ -29,6 +29,10 @@ def discover(root: Path, exclude_buckets: set[str]) -> list[tuple[Path, str]]:
             found[p] = "docs"
         elif "skills" not in exclude_buckets and any(x in SKILLS_DIR_NAMES for x in parts):
             found[p] = "skills"
+        elif include_all and not any(x.startswith(".") for x in p.relative_to(root).parts):
+            # Opt-in catch-all for vault-style corpora (Obsidian etc.) whose
+            # folders match none of the conventional buckets.
+            found[p] = "vault"
     if "subdir-allcaps" not in exclude_buckets:
         for child in root.iterdir():
             if not child.is_dir() or child.name in DEFAULT_EXCLUDES:

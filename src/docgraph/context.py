@@ -172,6 +172,62 @@ OVERSIZED_WHOLE_FILE_BUDGET_FRACTION = 0.25
 # is not grounds to demote it.
 
 
+CODE_HEADING_RELEVANCE = True
+# Retrieve-time, killable without reindexing. A code chunk whose heading (def /
+# class name, e.g. "generate_rollback_guide", "TradingEnv > step") shares a word
+# stem with the task is "relevant"; chunks are ordered by how many task stems
+# their heading matches (more first, from any seed), then unmatched chunks;
+# within each match-count group the breadth-first order, the oversized penalty
+# and the seed bands are unchanged. Code ranks never drop below
+# CODE_TIER_BASE, so seed/link tiers are untouched. Replaces corpus-wide
+# in-degree demotion, which the 2026-11-23 replay refuted (useful chunks live in
+# heavily-referenced files too).
+
+_CAMEL_RE = re.compile(r"([a-z0-9])([A-Z])")
+CODE_HEADING_NOISE = frozenset({"init", "self", "main", "get", "set", "run", "test"})
+_TASK_STOPWORDS = frozenset({
+    "how", "does", "what", "the", "for", "and", "this", "that", "with", "from",
+    "into", "about", "when", "why", "which", "where", "are", "was", "has", "have",
+    "can", "should", "explain", "work", "works", "change", "changed",
+    # Generic function words: "one"/"two" in a task title matched run_one_multiplier
+    # on a second corpus (coinbase-rl-bot) -- same failure as "data" in legacy-19.
+    "one", "two", "all", "any", "new", "use", "used", "using", "per", "not", "but",
+    "our", "its", "you", "your", "also", "than", "then", "them", "they", "out",
+    # Generic task verbs ("write tests for X" matched _write_summary, "what does X
+    # compute" matched compute_metrics): they name the request, not the code.
+    "write", "show", "list", "find", "make", "build", "create", "add", "fix",
+    "compute", "calculate", "describe", "tell", "give", "need", "want", "did",
+})
+
+
+def _identifier_stems(text: str | None) -> set[str]:
+    """Word stems of an identifier or phrase: CamelCase and snake_case are split,
+    tokens shorter than 3 chars dropped, then 5-char prefix (_stem_key)."""
+    if not text:
+        return set()
+    spaced = _CAMEL_RE.sub(r"\1 \2", text)
+    return {_stem_key(t) for t in re.findall(r"[A-Za-z0-9]+", spaced) if len(t) > 2}
+
+
+def _task_stems(task: str) -> set[str]:
+    # From the raw task, not _fts_words: that lowercases first, so "ExitManager"
+    # would stay one token and never match an `exit_manager`-style heading.
+    spaced = _CAMEL_RE.sub(r"\1 \2", task)
+    return {
+        _stem_key(t) for t in re.findall(r"[A-Za-z0-9]+", spaced)
+        if len(t) > 2 and t.lower() not in _TASK_STOPWORDS
+    } - CODE_HEADING_NOISE
+
+
+def _heading_matches(heading: str | None, task_stems: set[str]) -> int:
+    """How many distinct task stems the heading shares (0 = not relevant)."""
+    return len((_identifier_stems(heading) - CODE_HEADING_NOISE) & task_stems)
+
+
+def _heading_relevant(heading: str | None, task_stems: set[str]) -> bool:
+    return _heading_matches(heading, task_stems) > 0
+
+
 def retrieve(
     repo_root: Path,
     db_path: Path,
@@ -220,6 +276,7 @@ def retrieve(
     provenance: dict[int, str] = {}
     tier_detail: dict[int, str] = {}
     via: dict[int, str] = {}
+    relevant: set[int] = set()
     for i, row in enumerate(seeds):
         ranked[row["id"]] = float(i)
         meta[row["id"]] = row
@@ -268,6 +325,7 @@ def retrieve(
     # link tier (which occupies [seed_limit, seed_limit*2)) regardless of
     # seed_limit's value.
     CODE_TIER_BASE = seed_limit * 2
+    task_stems = _task_stems(task) if CODE_HEADING_RELEVANCE else set()
     for i, row in enumerate(seeds):
         code_targets = conn.execute(
             # NOTE: promoting symbol-resolved targets ("path#heading") ahead
@@ -346,9 +404,20 @@ def retrieve(
                     penalty = 0.5 if (
                         cc["heading"] is None and cc["token_est"] > oversized
                     ) else 0.0
+                    n_match = _heading_matches(cc["heading"], task_stems)
+                    is_rel = n_match > 0
+                    # Each task stem a heading FAILS to match shifts it one full
+                    # seed band down: most-matched chunks (any seed) first, the
+                    # unmatched last, each group keeping the breadth-first order
+                    # above. Ordering by match count (not just matched/unmatched)
+                    # keeps a heading hitting one generic stem ("data") from
+                    # outranking one hitting several ("news", "features").
+                    shift = seed_limit * (len(task_stems) - n_match)
                     ranked[cc["id"]] = (
-                        CODE_TIER_BASE + i + penalty + k / 100.0 + j / 10000.0
+                        CODE_TIER_BASE + shift + i + penalty + k / 100.0 + j / 10000.0
                     )
+                    if is_rel:
+                        relevant.add(cc["id"])
                     meta[cc["id"]] = cc
                     provenance[cc["id"]] = "code_ref"
                     tier_detail[cc["id"]] = detail
@@ -377,6 +446,7 @@ def retrieve(
             "provenance": provenance[chunk_id],
             "tier_detail": tier_detail.get(chunk_id),
             "via": via.get(chunk_id),
+            "relevant": chunk_id in relevant,
             "rank": rank,
             "token_est": meta[chunk_id]["token_est"],
         }
@@ -411,20 +481,70 @@ def retrieve(
             "provenance": provenance[chunk_id],
             "tier_detail": tier_detail.get(chunk_id),
             "via": via.get(chunk_id),
+            "relevant": chunk_id in relevant,
             "body": body,
         })
 
     conn.close()
+    confidence = _assess_confidence(words, query_used, seeds, chunks)
+    # Room the code tier actually had: budget minus everything non-code_ref
+    # that was selected. The confound under every per-tier precision number
+    # (V5 WS4) -- computed here, not in _log_query, so serve.py sees it too.
+    code_tier_room = max_tokens - sum(
+        c["token_est"] for c in chunks if c["provenance"] != "code_ref"
+    )
     result = {
         "task": task,
         "query_used": query_used,
+        "confidence": confidence,
         "budget": max_tokens,
+        "code_tier_room": code_tier_room,
         "total_tokens": running,
         "chunks": chunks,
         "budget_cut": budget_cut,
     }
     _log_query(result)
     return result
+
+
+WEAK_COVERAGE_FLOOR = 0.5
+# A pack is "weak" when even its best seed chunk contains fewer than this
+# fraction of the task's significant words. Tunable without reindexing.
+
+
+def _stem_key(word: str) -> str:
+    return word.lower()[:5]  # crude prefix stem, only for coverage heuristics
+
+
+def _assess_confidence(words: list[str], query_used: str, seeds, chunks: list[dict]) -> dict:
+    """Honesty signal: does this pack plausibly answer the task, or is it
+    whatever FTS could scrape together? Deliberately NOT based on query_used
+    alone -- an AND match on one generic hub doc is weak too -- so it combines
+    lexical coverage of the best seed chunk with absence of non-seed support."""
+    seed_chunks = [c for c in chunks if c["provenance"] == "seed"]
+    keys = {_stem_key(w) for w in words}
+    best = 0.0
+    for c in seed_chunks:
+        text = " ".join((c["indexed_title"], c["heading"] or "", c["body"])).lower()
+        toks = {t[:5] for t in re.findall(r"[a-z0-9]+", text)}
+        if keys:
+            best = max(best, len(keys & toks) / len(keys))
+    support = any(c["provenance"] != "seed" for c in chunks)
+    reasons = []
+    if not seeds:
+        reasons.append("no_match")
+    else:
+        if best < WEAK_COVERAGE_FLOOR:
+            reasons.append("low_coverage")
+        if query_used == "OR" and not support:
+            reasons.append("or_fallback_no_support")
+    return {
+        "weak": bool(reasons),
+        "reasons": reasons,
+        "seed_count": len(seeds),
+        "best_coverage": round(best, 2),
+        "non_seed_support": support,
+    }
 
 
 _QUERY_LOG_ENV = "DOCGRAPH_QUERY_LOG"
@@ -449,16 +569,18 @@ def _log_query(data: dict) -> None:
             "task": data["task"],
             "query_used": data["query_used"],
             "budget": data["budget"],
+            "code_tier_room": data.get("code_tier_room"),
             "total_tokens": data["total_tokens"],
             "chunks": [
                 {
                     "path": c["path"], "heading": c["heading"],
                     "provenance": c["provenance"], "tier_detail": c["tier_detail"], "via": c["via"],
-                    "rank": c["rank"], "token_est": c["token_est"],
+                    "rank": c["rank"], "token_est": c["token_est"], "relevant": c.get("relevant", False),
                 }
                 for c in data["chunks"]
             ],
             "budget_cut": data["budget_cut"],
+            "confidence": data.get("confidence"),
         }
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
@@ -480,6 +602,13 @@ def _render(data: dict) -> str:
     out = ["# DocGraph context pack", "", f"Task: {data['task']}", "",
            f"{len(data['chunks'])} chunks, ~{data['total_tokens']} tokens "
            f"(budget {data['budget']}, {data['query_used']}-matched seeds)", ""]
+    conf = data.get("confidence")
+    if conf and conf["weak"]:
+        out[-1:] = [
+            f"> WEAK PACK ({', '.join(conf['reasons'])}): best chunk covers "
+            f"{int(conf['best_coverage'] * 100)}% of the task's terms. The corpus may "
+            f"not contain an answer -- treat this as a lead, not an answer, and "
+            f"say so rather than citing it as authoritative.", ""]
     for c in data["chunks"]:
         out.append(f"## {c['indexed_title']}")
         loc = c["path"] + (f" § {c['heading']}" if c["heading"] else "")

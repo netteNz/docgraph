@@ -5,10 +5,10 @@ Nodes = files (docs table) — not chunks, that'd be too many nodes for a POC.
 Edges = co-location relationships (edges table, kind='colocation').
 Output = one self-contained HTML file (D3 via CDN, no build step, no server).
 
-This is a POC, not the live "V1 web graph" — no search, no context-pack
-panel, no click-to-inspect beyond a basic tooltip. Just: does the shape of
-the corpus look right when you can see it. See serve.py for the live,
-retrieval-driven version.
+This is the static view: no context-pack panel or live retrieval, but it
+shares its interactive UI (legend toggles, search, click-to-inspect detail
+panel, code-ref resolution findings) with serve.py via viewer_ui.py. See
+serve.py for the live, retrieval-driven version.
 """
 from __future__ import annotations
 
@@ -17,11 +17,14 @@ import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
 
+from .viewer_ui import RESOLUTION_CSS, RESOLUTION_JS  # noqa: F401 (RESOLUTION_JS re-exported for serve.py)
+
 BUCKET_COLORS = {
     "root": {"fill": "#8b949e", "glow": "#8b949e"},
     "docs": {"fill": "#58a6ff", "glow": "#58a6ff"},
     "skills": {"fill": "#bc8cff", "glow": "#bc8cff"},
     "subdir-allcaps": {"fill": "#3fb950", "glow": "#3fb950"},
+    "vault": {"fill": "#d2a8ff", "glow": "#d2a8ff"},
 }
 
 # Per-file-extension colors for bucket='code' nodes (V4: code files as real
@@ -205,6 +208,12 @@ TEMPLATE = """<!DOCTYPE html>
     box-shadow: 0 0 6px currentColor;
   }}
 
+  #legend .sectionTitle {{
+    margin-top: 10px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: #6e7681;
+  }}
+  #legend .sectionTitle:first-child {{ margin-top: 0; }}
+
   #tooltip {{
     position: fixed; pointer-events: none;
     background: rgba(22, 27, 34, 0.95);
@@ -224,17 +233,18 @@ TEMPLATE = """<!DOCTYPE html>
   }}
 
   .node-circle {{ cursor: pointer; }}
+{resolution_css}
 </style>
 </head>
 <body>
 <div id="legend"></div>
 <div id="tooltip"></div>
-<div id="stats">{node_count} files, {stats_label} — drag nodes, scroll to zoom</div>
+<div id="stats">{node_count} files, {stats_label} — drag nodes, scroll to zoom, click a node for details, / to search</div>
 <svg id="graph" width="100%" height="100vh"></svg>
 <script>
 const data = {data_json};
 const bucketColors = {colors_json};
-
+{resolution_js}
 const svg = d3.select("#graph");
 const width = window.innerWidth, height = window.innerHeight;
 
@@ -263,8 +273,11 @@ const lm = linkFilter.append("feMerge");
 lm.append("feMergeNode").attr("in", "blur");
 lm.append("feMergeNode").attr("in", "SourceGraphic");
 
+addArrowMarkers(defs);
+
 const g = svg.append("g");
-svg.call(d3.zoom().scaleExtent([0.2, 5]).on("zoom", (e) => g.attr("transform", e.transform)));
+const zoomBehavior = d3.zoom().scaleExtent([0.2, 5]).on("zoom", (e) => g.attr("transform", e.transform));
+svg.call(zoomBehavior);
 
 const sizeScale = d3.scaleSqrt().domain(d3.extent(data.nodes, d => d.tokens || 1)).range([4, 18]);
 
@@ -277,10 +290,11 @@ const sim = d3.forceSimulation(data.nodes)
 // ── Links ────────────────────────────────────────────────────────────────────
 const linkG = g.append("g").attr("class", "links");
 const link = linkG.selectAll("line").data(data.links).join("line")
-  .attr("stroke", d => d.kind === "code_ref" ? "#bc8cff" : "#21262d")
+  .attr("stroke", linkColor)
   .attr("stroke-width", 1)
-  .attr("stroke-opacity", d => d.kind === "code_ref" ? 0.55 : 0.7)
-  .attr("stroke-dasharray", d => d.kind === "structural" ? "3,3" : null);
+  .attr("stroke-opacity", linkOpacity)
+  .attr("stroke-dasharray", linkDash)
+  .attr("marker-end", linkMarker);
 
 // ── Nodes ────────────────────────────────────────────────────────────────────
 const nodeG = g.append("g").attr("class", "nodes");
@@ -288,8 +302,9 @@ const node = nodeG.selectAll("circle").data(data.nodes).join("circle")
   .attr("class", "node-circle")
   .attr("r", 0)
   .attr("fill", d => (bucketColors[d.bucket] || {{}}).fill || "#8b949e")
-  .attr("stroke", "#0d1117")
-  .attr("stroke-width", 1.5)
+  .attr("stroke", nodeStroke)
+  .attr("stroke-width", nodeStrokeWidth)
+  .attr("stroke-dasharray", nodeDash)
   .attr("fill-opacity", 0)
   .call(d3.drag()
     .on("start", (e, d) => {{ if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }})
@@ -328,7 +343,7 @@ node
         const sid = typeof l.source === "object" ? l.source.id : l.source;
         const tid = typeof l.target === "object" ? l.target.id : l.target;
         if (sid === d.id || tid === d.id) return (bucketColors[d.bucket] || {{}}).fill || "#8b949e";
-        return l.kind === "code_ref" ? "#bc8cff" : "#21262d";
+        return linkColor(l);
       }})
       .attr("stroke-width", l => {{
         const sid = typeof l.source === "object" ? l.source.id : l.source;
@@ -348,7 +363,8 @@ node
 
     const connCount = adjNodes.get(d.id)?.size || 0;
     tooltip.style("display", "block")
-      .html(`<b>${{d.title}}</b><div class="meta">${{d.path}}<br>${{d.bucket}} · ~${{d.tokens.toLocaleString()}} tokens · ${{connCount}} connection${{connCount !== 1 ? "s" : ""}}</div>`);
+      .style("left", (e.clientX + 16) + "px").style("top", (e.clientY + 12) + "px")
+      .html(`<b>${{d.title}}</b><div class="meta">${{d.path}}<br>${{d.bucket}} · ~${{d.tokens.toLocaleString()}} tokens · ${{connCount}} connection${{connCount !== 1 ? "s" : ""}}${{resolutionTooltip(d)}}</div>`);
   }})
   .on("mousemove", (e) => {{
     tooltip.style("left", (e.clientX + 16) + "px").style("top", (e.clientY + 12) + "px");
@@ -356,13 +372,13 @@ node
   .on("mouseout", function(e, d) {{
     const r = sizeScale(d.tokens || 1);
     d3.select(this).transition().duration(220).ease(d3.easeCubicOut)
-      .attr("r", r).attr("stroke-width", 1.5).attr("filter", null);
+      .attr("r", r).attr("stroke-width", nodeStrokeWidth(d)).attr("filter", null);
 
     node.transition().duration(200).attr("fill-opacity", 1);
     link.transition().duration(200)
-      .attr("stroke", l => l.kind === "code_ref" ? "#bc8cff" : "#21262d")
+      .attr("stroke", linkColor)
       .attr("stroke-width", 1)
-      .attr("stroke-opacity", l => l.kind === "code_ref" ? 0.55 : 0.7)
+      .attr("stroke-opacity", linkOpacity)
       .attr("filter", null);
 
     tooltip.style("display", "none");
@@ -370,8 +386,7 @@ node
 
 // ── Tick ──────────────────────────────────────────────────────────────────────
 sim.on("tick", () => {{
-  link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+  positionLinks(link);
   node.attr("cx", d => d.x).attr("cy", d => d.y);
 }});
 
@@ -391,33 +406,60 @@ sim.on("tick.spawn", () => {{
 
 // ── Legend ────────────────────────────────────────────────────────────────────
 const legend = d3.select("#legend");
+legend.append("div").attr("class", "sectionTitle").text("file buckets");
 Object.entries(bucketColors).forEach(([bucket, c]) => {{
   const row = legend.append("div");
   row.append("span").attr("class", "dot").style("background", c.fill).style("box-shadow", `0 0 6px ${{c.glow}}55`);
   row.append("span").text(bucket).style("color", "#8b949e");
+  makeToggle(row, "bucket:" + bucket);
 }});
-
-if (data.links.some(l => l.kind === "structural")) {{
-  const row = legend.append("div");
-  row.append("span")
-    .style("width", "14px").style("height", "0")
-    .style("border-top", "1.5px dashed #6e7681")
-    .style("display", "inline-block");
-  row.append("span").text("structural tie (no direct co-location)").style("color", "#8b949e");
-}}
-
-if (data.links.some(l => l.kind === "code_ref")) {{
-  const row = legend.append("div");
-  row.append("span")
-    .style("width", "14px").style("height", "0")
-    .style("border-top", "1.5px solid #bc8cff")
-    .style("display", "inline-block");
-  row.append("span").text("doc → code reference").style("color", "#8b949e");
-}}
+addViewerLegend(legend, data);
+initViewerUi();
 </script>
 </body>
 </html>
 """
+
+
+_STATUS_ORDER = {"ambiguous": 0, "resolved": 1, "dead": 2}
+CODE_METHOD_ORDER = {"exact": 0, "rooted": 1, "suffix": 2, "basename": 3, "scoped": 4, "depth": 5}
+MAX_AMBIGUOUS_SAMPLES = 6
+MAX_REFS_PER_DOC = 150  # detail-panel payload cap per doc
+
+
+def _resolution_findings(conn: sqlite3.Connection) -> tuple[dict, dict, dict]:
+    """(per-doc audit summary, resolved edges by (source, target-file), hub refs).
+
+    Tolerant of an index built before the audit tables existed: returns empty
+    dicts, and the visualizer simply shows no resolution findings."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if "code_ref_audit" not in tables:
+        return {}, {}, {}
+    per_doc: dict[str, dict] = {}
+    by_edge: dict[tuple[str, str], str] = {}
+    for r in conn.execute(
+        "SELECT source, mention, status, method, target, candidates FROM code_ref_audit ORDER BY source, mention"
+    ):
+        s = per_doc.setdefault(r["source"], {
+            "resolved": {}, "ambiguous": 0, "ambiguous_samples": [], "dead": 0, "refs": []})
+        if len(s["refs"]) < MAX_REFS_PER_DOC:
+            s["refs"].append({"mention": r["mention"], "status": r["status"], "method": r["method"],
+                              "target": r["target"], "candidates": r["candidates"]})
+        if r["status"] == "resolved":
+            s["resolved"][r["method"]] = s["resolved"].get(r["method"], 0) + 1
+            # Strongest method per (doc, file) labels the edge.
+            key = (r["source"], r["target"])
+            cur = by_edge.get(key)
+            if cur is None or CODE_METHOD_ORDER[r["method"]] < CODE_METHOD_ORDER[cur]:
+                by_edge[key] = r["method"]
+        elif r["status"] == "ambiguous":
+            s["ambiguous"] += 1
+            if len(s["ambiguous_samples"]) < MAX_AMBIGUOUS_SAMPLES:
+                s["ambiguous_samples"].append({"mention": r["mention"], "candidates": r["candidates"]})
+        else:
+            s["dead"] += 1
+    hubs = {r["source"]: r["refs"] for r in conn.execute("SELECT source, refs FROM hub_skips WHERE kind='code'")}
+    return per_doc, by_edge, hubs
 
 
 def graph_data(db_path: Path) -> dict:
@@ -426,23 +468,35 @@ def graph_data(db_path: Path) -> dict:
     so both rendering paths stay on the same corpus-shape logic."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
+    audit, edge_method, hubs = _resolution_findings(conn)
 
     docs = conn.execute("SELECT path, bucket, indexed_title, token_est FROM docs").fetchall()
     edges = conn.execute(
         "SELECT DISTINCT source, target FROM edges WHERE kind = 'colocation' AND source < target"
     ).fetchall()  # source < target dedupes the bidirectional pair back to one line per edge
+    doc_link_edges = conn.execute("SELECT DISTINCT source, target FROM edges WHERE kind = 'link'").fetchall()
     code_ref_edges = conn.execute(
         "SELECT source, target FROM edges WHERE kind = 'code_ref'"
     ).fetchall()
     conn.close()
 
-    nodes = [
-        {"id": d["path"], "path": d["path"], "title": d["indexed_title"] or d["path"],
-         "bucket": _code_bucket(d["path"]) if d["bucket"] == "code" else d["bucket"],
-         "tokens": d["token_est"]}
-        for d in docs
-    ]
+    nodes = []
+    for d in docs:
+        a = audit.get(d["path"], {})
+        nodes.append({
+            "id": d["path"], "path": d["path"], "title": d["indexed_title"] or d["path"],
+            "bucket": _code_bucket(d["path"]) if d["bucket"] == "code" else d["bucket"],
+            "tokens": d["token_est"],
+            "resolved": a.get("resolved", {}),
+            "ambiguous": a.get("ambiguous", 0),
+            "ambiguous_samples": a.get("ambiguous_samples", []),
+            "dead": a.get("dead", 0),
+            "hub_refs": hubs.get(d["path"], 0),
+            "refs": sorted(a.get("refs", []), key=lambda r: (_STATUS_ORDER[r["status"]], r["mention"])),
+        })
     links = [{"source": e["source"], "target": e["target"], "kind": "colocation"} for e in edges]
+
+    links += [{"source": e["source"], "target": e["target"], "kind": "link"} for e in doc_link_edges]
 
     # code_ref targets may carry a chunk heading (path#Heading) for
     # symbol-level refs -- strip it to land on the file-level node id, and
@@ -454,11 +508,23 @@ def graph_data(db_path: Path) -> dict:
         key = (e["source"], target)
         if key not in seen_code_links:
             seen_code_links.add(key)
-            links.append({"source": e["source"], "target": target, "kind": "code_ref"})
+            links.append({"source": e["source"], "target": target, "kind": "code_ref",
+                          "method": edge_method.get(key, "exact")})
 
     # code_ref links merged in first so code files with a real edge aren't
     # mistaken for orphans and given a fabricated structural tie.
     links = add_structural_ties(nodes, links)
+
+    # Edges the hub rule discarded: the hub doc resolved these targets but
+    # was skipped whole. Only drawable where the target file already exists
+    # as a node (code files are inserted only if some doc kept an edge to
+    # them); added after structural ties so they never count as "real" edges
+    # for orphan detection.
+    node_ids = {n["id"] for n in nodes}
+    for (source, target), method in sorted(edge_method.items()):
+        if source in hubs and target in node_ids and (source, target) not in seen_code_links:
+            links.append({"source": source, "target": target,
+                          "kind": "code_ref_suppressed", "method": method})
     return {"nodes": nodes, "links": links}
 
 
@@ -477,6 +543,8 @@ def build_html(db_path: Path, title: str = "") -> str:
         stats_label=stats_label,
         data_json=json.dumps(data),
         colors_json=json.dumps(bucket_colors_for(nodes)),
+        resolution_js=RESOLUTION_JS,
+        resolution_css=RESOLUTION_CSS,
     )
 
 

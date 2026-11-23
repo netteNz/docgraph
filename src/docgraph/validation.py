@@ -164,12 +164,21 @@ def summarize(
         }
     )
     used_any = 0
+    rooms: list[int] = []
     useful_cut = 0
     uncertain_cut = 0
 
     for call_id in reviewed_ids:
         entry = calls[call_id]
         review = reviews[call_id]
+        room = entry.get("code_tier_room")  # absent in logs predating V5 WS4
+        if room is None and "budget" in entry:
+            room = entry["budget"] - sum(
+                c.get("token_est", 0) for c in entry.get("chunks", [])
+                if c.get("provenance") != "code_ref"
+            )
+        if room is not None:
+            rooms.append(room)
         selected_reviews = {_candidate_key(row): row for row in review.get("selected", [])}
         tiers_exposed: set[str] = set()
         tiers_used: set[str] = set()
@@ -228,7 +237,21 @@ def summarize(
         "decision": decision,
         "tiers": dict(sorted(tier_stats.items())),
         "budget_cut": {"useful": useful_cut, "uncertain": uncertain_cut},
+        "code_tier_room": {
+            "calls": len(rooms),
+            "median": sorted(rooms)[len(rooms) // 2] if rooms else None,
+            "under_2000": sum(1 for r in rooms if r < 2000),
+        },
     }
+
+
+def _room_line(room: dict | None) -> list[str]:
+    if not room or not room.get("calls"):
+        return []
+    return [
+        f"- Code-tier room: median ~{room['median']} tokens; "
+        f"{room['under_2000']}/{room['calls']} calls under 2000"
+    ]
 
 
 def render_summary(summary: dict) -> str:
@@ -243,6 +266,7 @@ def render_summary(summary: dict) -> str:
         f"- Gate: {summary['decision']}",
         f"- Useful budget-cut candidates: {summary['budget_cut']['useful']} "
         f"({summary['budget_cut']['uncertain']} uncertain)",
+        *_room_line(summary.get("code_tier_room")),
         "",
         "| Tier | Exposed packs | Used packs | Precision | Selected/used chunks | Useful budget cuts |",
         "|---|---:|---:|---:|---:|---:|",

@@ -8,8 +8,10 @@ rl-stocks and coinbase-rl-bot corpora.
 """
 import posixpath
 import re
+from urllib.parse import unquote
 
 _LINK_RE = re.compile(r"(!?)\[([^\]]*)\]\(([^)\s]+)\)")
+_WIKILINK_RE = re.compile(r"(!?)\[\[([^\]\n]+?)\]\]")
 _FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
 _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 _EXTERNAL_SCHEMES = ("http://", "https://", "mailto:", "tel:")
@@ -60,4 +62,41 @@ def resolve_link(source_path: str, raw_target: str, known_paths: set[str]) -> st
         base = posixpath.dirname(source_path)
         target = raw_target
     normalized = posixpath.normpath(posixpath.join(base, target)) if base else posixpath.normpath(target)
-    return normalized if normalized in known_paths else None
+    if normalized in known_paths:
+        return normalized
+    decoded = unquote(normalized)  # Obsidian/Markdown editors emit %20 etc.
+    return decoded if decoded in known_paths else None
+
+
+def extract_wikilinks(body: str) -> list[str]:
+    """Return raw [[Target]] names (alias and #heading/^block stripped)."""
+    out = []
+    for is_embed, inner in _WIKILINK_RE.findall(_strip_code(body)):
+        name = inner.split("|", 1)[0].split("#", 1)[0].split("^", 1)[0].strip()
+        if not name or (is_embed and not name.lower().endswith(".md") and "." in name):
+            continue  # embedded image/pdf etc., not a note
+        out.append(name)
+    return out
+
+
+def build_wikilink_index(known_paths: set[str]) -> dict[str, list[str]]:
+    """Lowercased stem -> paths, shallowest first (Obsidian resolves by name)."""
+    idx: dict[str, list[str]] = {}
+    for p in sorted(known_paths, key=lambda x: (x.count("/"), x)):
+        idx.setdefault(posixpath.splitext(posixpath.basename(p))[0].lower(), []).append(p)
+    return idx
+
+
+def resolve_wikilink(name: str, index: dict[str, list[str]]) -> str | None:
+    """Resolve by path-or-stem; ambiguity resolved only by a unique shallowest
+    match (same 'no edges beats wrong edges' rule as code refs)."""
+    key = posixpath.splitext(name)[0].lower() if name.lower().endswith(".md") else name.lower()
+    cands = index.get(posixpath.basename(key), [])
+    if "/" in key:
+        cands = [c for c in cands if posixpath.splitext(c)[0].lower().endswith(key)]
+    if not cands:
+        return None
+    if len(cands) == 1:
+        return cands[0]
+    d = [c.count("/") for c in cands]
+    return cands[0] if d.count(d[0]) == 1 else None

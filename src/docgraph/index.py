@@ -31,10 +31,11 @@ from .code_chunks import build_chunks as _build_code_chunks
 from .code_chunks import is_chunking_candidate as _is_code_chunking_candidate
 from .code_refs import (
     CODE_EXTENSIONS, MAX_CODE_REFS_PER_DOC, extract_code_mentions, extract_symbol_mentions,
-    resolve_code_ref, resolve_symbol_ref, split_code_key,
+    resolve_code_ref_detailed, resolve_symbol_ref, split_code_key,
 )
 from .discover import DEFAULT_EXCLUDES, discover  # the validated 4-bucket rule
-from .links import MAX_LINK_FANOUT, extract_links, resolve_link
+from .links import (MAX_LINK_FANOUT, build_wikilink_index, extract_links,
+                    extract_wikilinks, resolve_link, resolve_wikilink)
 from .sections import is_chunking_candidate, split_sections, token_est as _token_est_shared
 
 H1_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
@@ -77,12 +78,13 @@ def _resolve_title(post: frontmatter.Post, body: str, path: Path) -> str:
     return m.group(1).strip() if m else path.stem
 
 
-def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = None) -> dict:
+def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = None,
+          include_all: bool = False) -> dict:
     repo_root = repo_root.resolve()
     conn = sqlite3.connect(db_path)
     conn.executescript(DROP + SCHEMA)  # always rebuild clean — no stale-state carryover
 
-    discovered = discover(repo_root, exclude_buckets or set())
+    discovered = discover(repo_root, exclude_buckets or set(), include_all)
     rows = []
     for path, bucket in discovered:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -122,6 +124,8 @@ def build(repo_root: Path, db_path: Path, exclude_buckets: set[str] | None = Non
         "dead_code_refs": code_result["dead_code_refs"],
         "ambiguous_code_refs": code_result["ambiguous_code_refs"],
         "code_hub_docs_skipped": code_result["hub_docs_skipped"],
+        "code_hub_refs": code_result["hub_refs"],
+        "code_resolved_by_method": code_result["resolved_by_method"],
         "symbol_edges": code_result["symbol_edges"],
     }
     conn.close()
@@ -219,11 +223,18 @@ def _build_link_edges(conn: sqlite3.Connection, rows: list[dict]) -> dict:
     # authorial signal (A cites B; B doesn't thereby cite A back), unlike
     # co-location's symmetric same-folder relationship — no reverse insert.
     known_paths = {r["path"] for r in rows}
+    wiki_index = build_wikilink_index(known_paths)
     n, dead_links, hub_docs_skipped = 0, 0, 0
     for r in rows:
         targets: set[str] = set()
         for raw_target, _anchor in extract_links(r["body"]):
             target = resolve_link(r["path"], raw_target, known_paths)
+            if target is None:
+                dead_links += 1
+            elif target != r["path"]:
+                targets.add(target)
+        for name in extract_wikilinks(r["body"]):
+            target = resolve_wikilink(name, wiki_index)
             if target is None:
                 dead_links += 1
             elif target != r["path"]:
@@ -299,20 +310,30 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
     doc_paths = {r["path"] for r in rows}
 
     n, dead_refs, ambiguous_refs, hub_docs_skipped = 0, 0, 0, 0
+    # Per-mention occurrence counts by how each resolved (V5 instrumentation).
+    method_counts = {"exact": 0, "rooted": 0, "suffix": 0, "basename": 0, "scoped": 0, "depth": 0}
     inserted: dict[str, int] = {}  # code path -> doc_id
     per_doc_targets: dict[str, set[str]] = {}
     chunk_cache: dict[str, tuple] = {}
+    # Visualizer/diagnostic audit trail: one row per distinct (doc, mention).
+    audit_rows: dict[tuple[str, str], tuple] = {}
+    hub_rows: list[tuple[str, str, int]] = []
 
     for r in rows:
         filename_targets: set[str] = set()
         for raw_target in extract_code_mentions(r["body"]):
-            resolved, status = resolve_code_ref(r["path"], raw_target, known_code_paths)
+            resolved, status, method, n_candidates = resolve_code_ref_detailed(
+                r["path"], raw_target, known_code_paths)
+            audit_rows[(r["path"], raw_target)] = (
+                r["path"], raw_target, status, method, resolved, n_candidates)
             if status == "dead":
                 dead_refs += 1
             elif status == "ambiguous":
                 ambiguous_refs += 1
-            elif resolved is not None and resolved not in doc_paths:
-                filename_targets.add(resolved)
+            elif resolved is not None:
+                method_counts[method] += 1
+                if resolved not in doc_paths:
+                    filename_targets.add(resolved)
 
         # V4: try to sharpen each filename target into a specific symbol
         # chunk via backticked symbol mentions in the same doc. A mention
@@ -350,6 +371,7 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
             # Same skip-entirely-not-truncate rule as link/colocation hubs —
             # no evidence yet for which N of a doc's code refs matter more.
             hub_docs_skipped += 1
+            hub_rows.append((r["path"], "code", len(targets)))
             continue
         per_doc_targets[r["path"]] = targets
 
@@ -428,12 +450,20 @@ def _build_code_edges(conn: sqlite3.Connection, repo_root: Path, rows: list[dict
             )
             n += 1
 
+    conn.executemany(
+        "INSERT INTO code_ref_audit(source,mention,status,method,target,candidates) VALUES(?,?,?,?,?,?)",
+        audit_rows.values(),
+    )
+    conn.executemany("INSERT INTO hub_skips(source,kind,refs) VALUES(?,?,?)", hub_rows)
+
     symbol_edges = conn.execute("SELECT COUNT(*) FROM edges WHERE kind='symbol'").fetchone()[0]
 
     return {
         "edges": n, "code_files_indexed": len(inserted),
         "dead_code_refs": dead_refs, "ambiguous_code_refs": ambiguous_refs,
         "hub_docs_skipped": hub_docs_skipped,
+        "hub_refs": {path: refs for path, _kind, refs in hub_rows},
+        "resolved_by_method": method_counts,
         "symbol_edges": symbol_edges,
     }
 
@@ -443,6 +473,8 @@ DROP TABLE IF EXISTS docs;
 DROP TABLE IF EXISTS chunks;
 DROP TABLE IF EXISTS edges;
 DROP TABLE IF EXISTS docs_fts;
+DROP TABLE IF EXISTS code_ref_audit;
+DROP TABLE IF EXISTS hub_skips;
 """
 
 SCHEMA = """
@@ -472,6 +504,24 @@ CREATE TABLE IF NOT EXISTS edges (
     weight REAL DEFAULT 1.0,
     PRIMARY KEY (source, target, kind)
 );
+-- Diagnostics only (never read by retrieve()): how each doc->code filename
+-- mention resolved, and which docs the hub rule discarded whole. Feeds the
+-- visualizer and the V5 validation gate's counters.
+CREATE TABLE IF NOT EXISTS code_ref_audit (
+    source     TEXT NOT NULL,
+    mention    TEXT NOT NULL,
+    status     TEXT NOT NULL,   -- resolved | ambiguous | dead
+    method     TEXT,            -- exact | basename | scoped | depth (resolved only)
+    target     TEXT,
+    candidates INTEGER,
+    PRIMARY KEY (source, mention)
+);
+CREATE TABLE IF NOT EXISTS hub_skips (
+    source TEXT NOT NULL,
+    kind   TEXT NOT NULL,
+    refs   INTEGER NOT NULL,
+    PRIMARY KEY (source, kind)
+);
 CREATE VIRTUAL TABLE IF NOT EXISTS docs_fts USING fts5(
     indexed_title, body,
     content='', tokenize='porter'
@@ -485,8 +535,10 @@ if __name__ == "__main__":
     p.add_argument("db_path", type=Path)
     p.add_argument("--exclude-bucket", action="append", default=[],
                     choices=["root", "docs", "skills", "subdir-allcaps"])
+    p.add_argument("--all-markdown", action="store_true",
+                   help="also index every other .md (Obsidian-style vaults); bucket 'vault'")
     args = p.parse_args()
-    result = build(args.repo_root, args.db_path, set(args.exclude_bucket))
+    result = build(args.repo_root, args.db_path, set(args.exclude_bucket), args.all_markdown)
     print(f"Indexed {result['files']} files, {result['edges']} co-location edges -> {result['db']}")
     if result["duplicates_dropped"]:
         print(f"  ({result['duplicates_dropped']} byte-identical duplicate files skipped — "
@@ -502,8 +554,13 @@ if __name__ == "__main__":
               f"resolved links skipped as link hubs — no link edges from them)")
     print(f"  {result['code_edges']} code_ref edges, {result['code_files_indexed']} code files indexed, "
           f"{result['dead_code_refs']} dead code refs, {result['ambiguous_code_refs']} ambiguous code refs")
+    m = result["code_resolved_by_method"]
+    print(f"  code ref resolution (mentions): exact={m['exact']} rooted={m['rooted']} suffix={m['suffix']} basename={m['basename']} "
+          f"scoped={m['scoped']} depth={m['depth']} ambiguous={result['ambiguous_code_refs']}")
     if result["code_hub_docs_skipped"]:
         print(f"  ({result['code_hub_docs_skipped']} docs over {MAX_CODE_REFS_PER_DOC} "
               f"resolved code refs skipped as code hubs — no code_ref edges from them)")
+        for path, refs in sorted(result["code_hub_refs"].items(), key=lambda kv: -kv[1]):
+            print(f"      hub-skipped: {path} ({refs} distinct resolved refs)")
     print(f"  {result['symbol_edges']} symbol edges (V4, intra-file, "
           f"HUB_NAME_FANOUT={HUB_NAME_FANOUT})")

@@ -73,6 +73,6 @@
       "via": "CLAUDE.md",
       "provenance": "code_ref"
     },
-    "note": "CLAUDE.md has zero code_ref edges -- negative control, mirrors document_parser's system_prompt.md finding: a doc with genuinely no code references should produce zero code_ref chunks attributed to it, not a false positive from basename ambiguity. Scoped to via=CLAUDE.md specifically (not 'zero code_ref chunks in the whole pack') since the corpus has since grown a README.md that also seeds this task and has its own unrelated, real code_ref edges -- that's correct behavior, not something this fixture should exclude."
+    "note": "CLAUDE.md has zero code_ref edges, but NOT because it lacks code references: it resolves 19+ distinct targets and is skipped whole by the MAX_CODE_REFS_PER_DOC=10 hub rule (index.py). This control therefore guards the hub skip, not basename ambiguity -- any change that un-skips CLAUDE.md (raising the cap, exempting map docs) must re-decide this fixture rather than just update it. Scoped to via=CLAUDE.md specifically (not 'zero code_ref chunks in the whole pack') since the corpus has since grown a README.md that also seeds this task and has its own unrelated, real code_ref edges -- that's correct behavior, not something this fixture should exclude."
   }
 ]

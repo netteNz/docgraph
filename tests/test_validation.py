@@ -116,3 +116,23 @@ def test_render_summary_includes_per_tier_table(tmp_path):
     text = render_summary(summary)
     assert "# DocGraph validation study" in text
     assert "| Tier |" in text
+
+
+def test_summary_reports_code_tier_room_logged_or_reconstructed(tmp_path):
+    query_log = tmp_path / "log.jsonl"
+    annotations = tmp_path / "log.annotations.jsonl"
+    logged = _entry("a", "c1")
+    logged["code_tier_room"] = 1500
+    legacy = _entry("b", "c2", chunks=[
+        {"path": "A.md", "provenance": "seed", "token_est": 5000},
+        {"path": "x.py", "provenance": "code_ref", "token_est": 900},
+    ])
+    legacy["budget"] = 8000  # no code_tier_room field: reconstructed -> 3000
+    no_budget = _entry("c", "c3")  # neither field: skipped, no KeyError
+    _write_jsonl(query_log, [logged, legacy, no_budget])
+    _write_jsonl(annotations, [{"call_id": c} for c in ("c1", "c2", "c3")])
+
+    summary = summarize(query_log, annotations, min_calls=1)
+
+    assert summary["code_tier_room"] == {"calls": 2, "median": 3000, "under_2000": 1}
+    assert "Code-tier room: median ~3000 tokens; 1/2 calls under 2000" in render_summary(summary)

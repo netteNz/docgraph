@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .context import retrieve
+from .viewer_ui import RESOLUTION_CSS, RESOLUTION_JS
 from .visualize import bucket_colors_for, graph_data
 
 SERVE_TEMPLATE = """<!DOCTYPE html>
@@ -100,6 +101,7 @@ SERVE_TEMPLATE = """<!DOCTYPE html>
   }}
   #packToggle:hover {{ border-color: #58a6ff; color: #c9d1d9; }}
   #pack h2 {{ font-size: 13px; color: #e6edf3; margin: 0 0 4px 0; }}
+  #pack .weakBanner {{ background: #3d2e00; color: #d29922; border: 1px solid #d29922; border-radius: 4px; padding: 6px 8px; font-size: 12px; margin-bottom: 10px; }}
   #pack .packMeta {{ color: #8b949e; font-size: 11px; margin-bottom: 14px; }}
   #pack .chunk {{ margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid #21262d; }}
   #pack .chunk h3 {{ font-size: 12px; color: #58a6ff; margin: 0 0 2px 0; }}
@@ -141,6 +143,7 @@ SERVE_TEMPLATE = """<!DOCTYPE html>
   }}
 
   .node-circle {{ cursor: pointer; }}
+{resolution_css}
 </style>
 </head>
 <body>
@@ -166,6 +169,7 @@ SERVE_TEMPLATE = """<!DOCTYPE html>
 const data = {data_json};
 const bucketColors = {colors_json};
 const provenanceColors = {{ seed: "#3fb950", neighbor: "#d29922", link: "#58a6ff", code_ref: "#bc8cff" }};
+{resolution_js}
 
 const svg = d3.select("#graph");
 const width = window.innerWidth, height = window.innerHeight;
@@ -206,6 +210,8 @@ const pulseMerge = pulseFilter.append("feMerge");
 pulseMerge.append("feMergeNode").attr("in", "blur");
 pulseMerge.append("feMergeNode").attr("in", "SourceGraphic");
 
+addArrowMarkers(defs);
+
 const g = svg.append("g");
 const zoomBehavior = d3.zoom().scaleExtent([0.2, 5]).on("zoom", (e) => g.attr("transform", e.transform));
 svg.call(zoomBehavior);
@@ -220,18 +226,20 @@ const sim = d3.forceSimulation(data.nodes)
 
 const linkG = g.append("g").attr("class", "links");
 const link = linkG.selectAll("line").data(data.links).join("line")
-  .attr("stroke", d => d.kind === "code_ref" ? "#bc8cff" : "#21262d")
+  .attr("stroke", linkColor)
   .attr("stroke-width", 1)
-  .attr("stroke-opacity", d => d.kind === "code_ref" ? 0.55 : 0.7)
-  .attr("stroke-dasharray", d => d.kind === "structural" ? "3,3" : null);
+  .attr("stroke-opacity", linkOpacity)
+  .attr("stroke-dasharray", linkDash)
+  .attr("marker-end", linkMarker);
 
 const nodeG = g.append("g").attr("class", "nodes");
 const node = nodeG.selectAll("circle").data(data.nodes).join("circle")
   .attr("class", "node-circle")
   .attr("r", 0)
   .attr("fill", d => (bucketColors[d.bucket] || {{}}).fill || "#8b949e")
-  .attr("stroke", "#0d1117")
-  .attr("stroke-width", 1.5)
+  .attr("stroke", nodeStroke)
+  .attr("stroke-width", nodeStrokeWidth)
+  .attr("stroke-dasharray", nodeDash)
   .attr("fill-opacity", 0)
   .call(d3.drag()
     .on("start", (e, d) => {{ if (!e.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; }})
@@ -255,7 +263,7 @@ function restingR(d) {{
   return sizeScale(d.tokens || 1) * (selection.has(d.id) ? (sel === "seed" ? 1.4 : 1.15) : 1);
 }}
 function restingStroke(d) {{
-  return selection.has(d.id) ? provenanceColors[selection.get(d.id)] : "#0d1117";
+  return selection.has(d.id) ? provenanceColors[selection.get(d.id)] : nodeStroke(d);
 }}
 function restingFilter(d) {{
   return selection.has(d.id) ? `url(#glow-prov-${{selection.get(d.id)}})` : null;
@@ -266,11 +274,11 @@ function resetHighlight() {{
   node.transition().duration(200)
     .attr("fill-opacity", 1).attr("filter", null)
     .attr("r", d => sizeScale(d.tokens || 1))
-    .attr("stroke", "#0d1117").attr("stroke-width", 1.5);
+    .attr("stroke", nodeStroke).attr("stroke-width", nodeStrokeWidth);
   link.transition().duration(200)
-    .attr("stroke", l => l.kind === "code_ref" ? "#bc8cff" : "#21262d")
+    .attr("stroke", linkColor)
     .attr("stroke-width", 1)
-    .attr("stroke-opacity", l => l.kind === "code_ref" ? 0.55 : 0.7);
+    .attr("stroke-opacity", linkOpacity);
   provSectionEl.style.display = "none";
 }}
 
@@ -281,7 +289,7 @@ function applyHighlight() {{
     .attr("filter", d => restingFilter(d))
     .attr("r", d => restingR(d))
     .attr("stroke", d => restingStroke(d))
-    .attr("stroke-width", d => selection.has(d.id) ? 2 : 1.5);
+    .attr("stroke-width", d => selection.has(d.id) ? 2 : nodeStrokeWidth(d));
   link.transition().duration(200)
     .attr("stroke-opacity", 0.15);
   provSectionEl.style.display = "block";
@@ -297,7 +305,7 @@ function pulseNode(path) {{
     .attr("r", restingR(d) * 1.8).attr("stroke", "#e6edf3").attr("stroke-width", 3.5)
     .attr("filter", "url(#glow-selected-pulse)")
     .transition().delay(250).duration(450).ease(d3.easeCubicInOut)
-    .attr("r", restingR(d)).attr("stroke", restingStroke(d)).attr("stroke-width", selection.has(d.id) ? 2 : 1.5)
+    .attr("r", restingR(d)).attr("stroke", restingStroke(d)).attr("stroke-width", selection.has(d.id) ? 2 : nodeStrokeWidth(d))
     .attr("filter", restingFilter(d));
 
   const k = d3.zoomTransform(svg.node()).k;
@@ -323,21 +331,21 @@ node
     const sel = selection.get(d.id);
     const selLine = sel ? `<br><span style="color:${{provenanceColors[sel]}}">${{sel}} in current pack</span>` : "";
     tooltip.style("display", "block")
-      .html(`<b>${{d.title}}</b><div class="meta">${{d.path}}<br>${{d.bucket}} · ~${{d.tokens.toLocaleString()}} tokens · ${{connCount}} connection${{connCount !== 1 ? "s" : ""}}${{selLine}}</div>`);
+      .style("left", (e.clientX + 16) + "px").style("top", (e.clientY + 12) + "px")
+      .html(`<b>${{d.title}}</b><div class="meta">${{d.path}}<br>${{d.bucket}} · ~${{d.tokens.toLocaleString()}} tokens · ${{connCount}} connection${{connCount !== 1 ? "s" : ""}}${{selLine}}${{resolutionTooltip(d)}}</div>`);
   }})
   .on("mousemove", (e) => {{
     tooltip.style("left", (e.clientX + 16) + "px").style("top", (e.clientY + 12) + "px");
   }})
   .on("mouseout", function(e, d) {{
     d3.select(this).transition().duration(220).ease(d3.easeCubicOut)
-      .attr("r", restingR(d)).attr("stroke-width", selection.has(d.id) ? 2 : 1.5)
+      .attr("r", restingR(d)).attr("stroke-width", selection.has(d.id) ? 2 : nodeStrokeWidth(d))
       .attr("filter", restingFilter(d));
     tooltip.style("display", "none");
   }});
 
 sim.on("tick", () => {{
-  link.attr("x1", d => d.source.x).attr("y1", d => d.source.y)
-      .attr("x2", d => d.target.x).attr("y2", d => d.target.y);
+  positionLinks(link);
   node.attr("cx", d => d.x).attr("cy", d => d.y);
 }});
 
@@ -358,23 +366,10 @@ Object.entries(bucketColors).forEach(([bucket, c]) => {{
   const row = legend.append("div");
   row.append("span").attr("class", "dot").style("background", c.fill).style("box-shadow", `0 0 6px ${{c.glow}}55`);
   row.append("span").text(bucket).style("color", "#8b949e");
+  makeToggle(row, "bucket:" + bucket);
 }});
-if (data.links.some(l => l.kind === "structural")) {{
-  const row = legend.append("div");
-  row.append("span")
-    .style("width", "14px").style("height", "0")
-    .style("border-top", "1.5px dashed #6e7681")
-    .style("display", "inline-block");
-  row.append("span").text("structural tie (no direct co-location)").style("color", "#8b949e");
-}}
-if (data.links.some(l => l.kind === "code_ref")) {{
-  const row = legend.append("div");
-  row.append("span")
-    .style("width", "14px").style("height", "0")
-    .style("border-top", "1.5px solid #bc8cff")
-    .style("display", "inline-block");
-  row.append("span").text("doc → code reference").style("color", "#8b949e");
-}}
+addViewerLegend(legend, data);
+initViewerUi();
 
 const provSection = legend.append("div").attr("id", "provSection");
 const provSectionEl = document.getElementById("provSection");
@@ -422,6 +417,10 @@ function renderPack(json) {{
     return;
   }}
   let html = `<h2>${{escapeHtml(json.task)}}</h2>`;
+  const conf = json.confidence;
+  if (conf && conf.weak) {{
+    html += `<div class="weakBanner">WEAK PACK (${{conf.reasons.join(", ")}}) — best chunk covers ${{Math.round(conf.best_coverage * 100)}}% of the task terms; the corpus may not contain an answer.</div>`;
+  }}
   html += `<div class="packMeta">${{json.chunks.length}} chunks, ~${{json.total_tokens}} tokens (budget ${{json.budget}}, ${{json.query_used}}-matched seeds)</div>`;
   for (const c of json.chunks) {{
     const loc = c.path + (c.heading ? ` § ${{c.heading}}` : "");
@@ -528,6 +527,8 @@ def _page_html(db_path: Path, title: str) -> str:
         stats_label=stats_label,
         data_json=json.dumps(data),
         colors_json=json.dumps(bucket_colors_for(data["nodes"])),
+        resolution_js=RESOLUTION_JS,
+        resolution_css=RESOLUTION_CSS,
     )
 
 

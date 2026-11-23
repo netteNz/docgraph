@@ -52,28 +52,114 @@ def extract_code_mentions(body: str) -> list[str]:
     return out
 
 
-def resolve_code_ref(source_path: str, raw_target: str, known_code_paths: set[str]) -> tuple[str | None, str]:
-    """Resolve a filename mention to a known code file's repo-relative path.
+def _unique_shallowest(paths: list[str]) -> str | None:
+    """The single path at minimum depth, or None if two or more tie there."""
+    depth = min(p.count("/") for p in paths)
+    shallowest = [p for p in paths if p.count("/") == depth]
+    return shallowest[0] if len(shallowest) == 1 else None
 
-    Tries relative-path resolution first (same normalization as
-    links.py::resolve_link), then falls back to a basename match: if exactly
-    one known code file has that basename, use it. Returns (path, "resolved"),
-    (None, "dead") for zero matches, or (None, "ambiguous") for 2+ basename
-    matches — tracked separately since ambiguous refs could be made real by
-    disambiguating, dead ones can't (no edges beats wrong edges either way).
+
+def resolve_code_ref_detailed(
+    source_path: str, raw_target: str, known_code_paths: set[str],
+) -> tuple[str | None, str, str | None, int]:
+    """Resolve a filename mention, reporting *how* it resolved.
+
+    Returns (path, status, method, n_candidates). status is "resolved",
+    "dead" (no basename match at all) or "ambiguous"; method is set only
+    when resolved. First match wins:
+
+    1. exact       — relative-path resolution (same normalization as
+                     links.py::resolve_link).
+    2. basename    — exactly one known code file has that basename.
+    3. scoped      — 2+ basename matches, and exactly one shares the source
+                     doc's top-level directory. With 2+ in that directory,
+                     the shallowest-path tiebreak applies *within the scope
+                     only* — never escaping into another subproject, since
+                     a wrong edge is worse than none. Root-level docs have
+                     no subtree and skip this step.
+    4. depth       — 2+ basename matches, none inside the doc's subtree:
+                     the single shallowest path wins (a canonical top-level
+                     copy beats a nested one, e.g. src/x.py over
+                     staging/src/x.py). A tie at minimum depth stays
+                     ambiguous.
+
+    Path-qualified mentions (containing "/") never reach the basename tiers:
+    the qualifier is evidence, and ignoring it mis-resolved e.g.
+    `src/dashboard/pages/experiments.py` (written from docs/) to
+    src/experiments.py. They resolve by:
+
+    1a. rooted     — the qualified path is itself a repo-root-relative path.
+    1b. suffix     — known files whose path ends with "/<qualified path>";
+                     unique, or unique-shallowest among several. Failing that,
+                     the longest known multi-segment path the mention itself
+                     ends with (foreign absolute paths into the repo).
+    A qualified mention matching neither is dead (stale or foreign path), not
+    a basename fallback.
+
+    Ambiguous refs are tracked separately from dead ones: a tie could be
+    made real by more evidence, a dead ref can't.
     """
     base = posixpath.dirname(source_path)
     normalized = posixpath.normpath(posixpath.join(base, raw_target)) if base else posixpath.normpath(raw_target)
     if normalized in known_code_paths:
-        return normalized, "resolved"
+        return normalized, "resolved", "exact", 1
+
+    if "/" in raw_target:
+        qualified = posixpath.normpath(raw_target)
+        while qualified.startswith(("./", "../", "/")):
+            qualified = qualified.split("/", 1)[1] if not qualified.startswith("/") else qualified[1:]
+        if qualified in known_code_paths:
+            return qualified, "resolved", "rooted", 1
+        tail = "/" + qualified
+        suffixed = [p for p in known_code_paths if p.endswith(tail)]
+        if not suffixed:
+            # A foreign absolute path (/Users/x/proj/src/a.py, C:/work/src/a.py)
+            # *contains* a repo path: match the longest known multi-segment path
+            # the mention ends with. Single-segment known paths are excluded --
+            # "<anything>/app.py" must not resolve to a top-level app.py.
+            contained = [p for p in known_code_paths if "/" in p and qualified.endswith("/" + p)]
+            if contained:
+                longest = max(len(p) for p in contained)
+                best = [p for p in contained if len(p) == longest]
+                if len(best) == 1:
+                    return best[0], "resolved", "suffix", 1
+                return None, "ambiguous", None, len(best)
+            return None, "dead", None, 0
+        if len(suffixed) == 1:
+            return suffixed[0], "resolved", "suffix", 1
+        winner = _unique_shallowest(suffixed)
+        if winner is not None:
+            return winner, "resolved", "suffix", len(suffixed)
+        return None, "ambiguous", None, len(suffixed)
 
     target_name = posixpath.basename(raw_target)
     matches = [p for p in known_code_paths if posixpath.basename(p) == target_name]
+    if not matches:
+        return None, "dead", None, 0
     if len(matches) == 1:
-        return matches[0], "resolved"
-    if len(matches) > 1:
-        return None, "ambiguous"
-    return None, "dead"
+        return matches[0], "resolved", "basename", 1
+
+    top = source_path.split("/", 1)[0] if "/" in source_path else ""
+    if top:
+        scoped = [p for p in matches if "/" in p and p.split("/", 1)[0] == top]
+        if len(scoped) == 1:
+            return scoped[0], "resolved", "scoped", len(matches)
+        if len(scoped) > 1:
+            winner = _unique_shallowest(scoped)
+            if winner is not None:
+                return winner, "resolved", "scoped", len(matches)
+            return None, "ambiguous", None, len(matches)
+
+    winner = _unique_shallowest(matches)
+    if winner is not None:
+        return winner, "resolved", "depth", len(matches)
+    return None, "ambiguous", None, len(matches)
+
+
+def resolve_code_ref(source_path: str, raw_target: str, known_code_paths: set[str]) -> tuple[str | None, str]:
+    """(path|None, status) view of resolve_code_ref_detailed — see there."""
+    path, status, _method, _n = resolve_code_ref_detailed(source_path, raw_target, known_code_paths)
+    return path, status
 
 
 _SYMBOL_SHAPE_RE = re.compile(
